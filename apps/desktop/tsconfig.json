@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@lifesim/sim": ["../../packages/sim/src"],
+      "@lifesim/content": ["../../packages/content/src"],
+      "@lifesim/render": ["../../packages/render/src"],
+      "@lifesim/shared": ["../../packages/shared/src"]
+    }
+  },
+  "include": ["src"]
+}
