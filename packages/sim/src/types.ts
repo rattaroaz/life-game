@@ -110,6 +110,8 @@ export type CraftingState = {
 export type SimEntity = {
   kind: 'sim';
   id: EntityId;
+  /** Which city place this Sim is currently in */
+  placeId: string;
   transform: { x: number; y: number; zFloor: number; facing: Facing };
   identity: { firstName: string; lastName: string; ageStage: 'adult' };
   visual: SimVisual;
@@ -136,6 +138,8 @@ export type SimEntity = {
 export type ObjectEntity = {
   kind: 'object';
   id: EntityId;
+  /** Place this object belongs to */
+  placeId: string;
   transform: { x: number; y: number; zFloor: number; rot: Rot };
   defId: string;
   quality: number;
@@ -177,13 +181,29 @@ export type SimEvent =
   | { type: 'action_failed'; simId: EntityId; reason: ActionFailReason }
   | { type: 'action_done'; simId: EntityId; interactionId: string }
   | { type: 'work_left'; simId: EntityId }
-  | { type: 'work_return'; simId: EntityId; pay: number };
+  | { type: 'work_return'; simId: EntityId; pay: number }
+  | { type: 'travel'; simId: EntityId; placeId: string; placeName: string };
 
 export type World = {
   nextId: EntityId;
   entities: Map<EntityId, EntityRecord>;
   relationships: RelationshipEdge[];
+  /** Active place lot (view pointer — same ref as lots[activePlaceId]) */
   lot: LotState;
+  /** All city lots by place id */
+  lots: Record<string, LotState>;
+  neighborhood: {
+    places: {
+      id: string;
+      name: string;
+      kind: string;
+      ground: string;
+      description: string;
+      exits: { to: string; label: string; x: number; y: number }[];
+    }[];
+    activePlaceId: string;
+    homePlaceId: string;
+  };
   household: HouseholdState;
   clock: ClockState;
   rng: RngState;
@@ -304,11 +324,16 @@ export type HudProjection = {
   mode: GameMode;
   speed: number;
   paused: boolean;
+  placeId: string;
+  placeName: string;
+  places: { id: string; name: string; kind: string; description: string }[];
   householdSims: {
     id: EntityId;
     name: string;
     mood: number;
     presence: 'on_lot' | 'at_work';
+    placeId: string;
+    placeName: string;
     needs: Needs;
   }[];
   selectedSim: null | {
@@ -322,6 +347,7 @@ export type HudProjection = {
     action: ActionStatus;
     aspiration: AspirationState;
     traits: string[];
+    placeId: string;
   };
   target: null | {
     id: EntityId;

@@ -1,4 +1,12 @@
+import { systemAutonomy, systemSurvivalSafety } from './autonomy.js';
 import { advanceClock, isWeekend } from './clock.js';
+import type { LotState } from './lot.js';
+import {
+  getPlaceMeta,
+  setActivePlace,
+  travelSimToPlace,
+} from './neighborhood.js';
+import { getObs } from './observability/hub.js';
 import { findPath } from './pathfinding.js';
 import { addRelationshipDelta } from './relationships.js';
 import { nextRng } from './rng.js';
@@ -12,7 +20,17 @@ import type {
   SimEntity,
   World,
 } from './types.js';
-import { allObjects, allSims, getObject, getSim, refreshLotCaches } from './world.js';
+import { allObjects, allSims, getObject, getSim } from './world.js';
+
+export { systemAutonomy } from './autonomy.js';
+
+function simLot(world: World, sim: SimEntity): LotState {
+  return world.lots[sim.placeId] ?? world.lot;
+}
+
+function objectsHere(world: World, placeId: string): ObjectEntity[] {
+  return allObjects(world).filter((o) => o.placeId === placeId);
+}
 
 const NEED_KEYS = ['hunger', 'energy', 'bladder', 'hygiene', 'fun', 'social'] as const;
 
@@ -41,8 +59,25 @@ function failAction(world: World, sim: SimEntity, interactionId: string, reason:
   sim.action = { kind: 'failed', interactionId, reason };
   sim.path.waypoints = [];
   sim.path.index = 0;
+  // Self-sufficiency: retry soon after failures (don't lock AI out)
+  sim.autonomy.nextPlanTick = world.clock.tick + 1;
+  sim.autonomy.cooldownUntil = 0;
   world.eventBus.push({ type: 'action_failed', simId: sim.id, reason });
-  world.eventBus.push({ type: 'toast', message: `${sim.identity.firstName}: ${reason.replace(/_/g, ' ')}` });
+  // Avoid toast spam for routine AI fails
+  if (reason === 'preempted_work' || reason === 'preempted_critical') {
+    world.eventBus.push({
+      type: 'toast',
+      message: `${sim.identity.firstName}: ${reason.replace(/_/g, ' ')}`,
+    });
+  }
+  getObs().noteActionResult(false, {
+    simId: sim.id,
+    interactionId,
+    reason,
+  });
+  if (reason === 'path_impossible') {
+    getObs().notePathResult(false, { simId: sim.id, interactionId });
+  }
 }
 
 function releaseSlot(world: World, sim: SimEntity): void {
@@ -279,7 +314,6 @@ export function systemCareerSchedule(world: World, content: ContentPack): void {
       dayOk && min >= career.schedule.startMinute && min < career.schedule.endMinute;
 
     if (working && sim.presence === 'on_lot') {
-      // Preempt
       if (sim.action.kind !== 'idle') {
         const iid =
           sim.action.kind === 'performing' ||
@@ -291,6 +325,12 @@ export function systemCareerSchedule(world: World, content: ContentPack): void {
       }
       sim.queue.items = [];
       clearSocialPair(world, sim);
+      // Go to office place when possible
+      const workPlace =
+        sim.career.trackId?.includes('chef') ? 'cafe' : 'office';
+      if (world.lots[workPlace]) {
+        travelSimToPlace(world, sim.id, workPlace);
+      }
       sim.presence = 'at_work';
       sim.anim.clip = 'idle';
       world.eventBus.push({ type: 'work_left', simId: sim.id });
@@ -305,7 +345,6 @@ export function systemCareerSchedule(world: World, content: ContentPack): void {
       world.household.funds += pay;
       sim.career.daysWorked += 1;
       sim.career.performance = clamp(sim.career.performance + 5, 0, 100);
-      // promotion
       if (
         sim.career.performance >= 80 &&
         sim.career.level < career.levels.length - 1
@@ -321,16 +360,15 @@ export function systemCareerSchedule(world: World, content: ContentPack): void {
           });
         }
       }
-      const entry = world.lot.entryMarkers[0] ?? { x: 14, y: 21 };
-      sim.transform.x = entry.x;
-      sim.transform.y = entry.y;
+      const home = world.neighborhood.homePlaceId;
+      travelSimToPlace(world, sim.id, home);
       sim.presence = 'on_lot';
       sim.needs.social = clamp(sim.needs.social + 10, 0, 100);
       sim.needs.fun = clamp(sim.needs.fun - 10, 0, 100);
       world.eventBus.push({ type: 'work_return', simId: sim.id, pay });
       world.eventBus.push({
         type: 'toast',
-        message: `${sim.identity.firstName} returned (+$${pay})`,
+        message: `${sim.identity.firstName} returned home (+$${pay})`,
       });
     }
   }
@@ -376,16 +414,19 @@ export function systemInteractionProgress(world: World, content: ContentPack): v
 
       if (idef.social && sim.action.targetId != null) {
         const partner = getSim(world, sim.action.targetId);
-        if (!partner || partner.presence !== 'on_lot') {
+        if (
+          !partner ||
+          partner.presence !== 'on_lot' ||
+          partner.placeId !== sim.placeId
+        ) {
           failAction(world, sim, idef.id, 'target_invalid');
           continue;
         }
-        // path to adjacent
+        const lot = simLot(world, sim);
         const goal = {
           x: Math.round(partner.transform.x),
           y: Math.round(partner.transform.y),
         };
-        // pick neighbor cell
         const neigh = [
           { x: goal.x + 1, y: goal.y },
           { x: goal.x - 1, y: goal.y },
@@ -395,7 +436,7 @@ export function systemInteractionProgress(world: World, content: ContentPack): v
         let bestPath: { x: number; y: number }[] | null = null;
         for (const n of neigh) {
           const p = findPath(
-            world.lot,
+            lot,
             { x: Math.round(sim.transform.x), y: Math.round(sim.transform.y) },
             n,
           );
@@ -416,9 +457,9 @@ export function systemInteractionProgress(world: World, content: ContentPack): v
         continue;
       }
 
-      // Object interaction
+      // Object interaction — must share place
       const target = sim.action.targetId != null ? getObject(world, sim.action.targetId) : null;
-      if (!target) {
+      if (!target || target.placeId !== sim.placeId) {
         failAction(world, sim, idef.id, 'target_invalid');
         continue;
       }
@@ -455,7 +496,7 @@ export function systemInteractionProgress(world: World, content: ContentPack): v
         slotId = slotDef.id;
       }
       const path = findPath(
-        world.lot,
+        simLot(world, sim),
         { x: Math.round(sim.transform.x), y: Math.round(sim.transform.y) },
         approach,
       );
@@ -463,6 +504,11 @@ export function systemInteractionProgress(world: World, content: ContentPack): v
         failAction(world, sim, idef.id, 'path_impossible');
         continue;
       }
+      getObs().notePathResult(true, {
+        simId: sim.id,
+        interactionId: idef.id,
+        pathLen: path.length,
+      });
       sim.path.waypoints = path;
       sim.path.index = 0;
       // reserve slot
@@ -486,6 +532,16 @@ export function systemInteractionProgress(world: World, content: ContentPack): v
 export function systemPath(world: World, content: ContentPack): void {
   for (const sim of allSims(world)) {
     if (sim.presence !== 'on_lot') continue;
+    // Sanitize NaN transforms (can freeze/crash renderer)
+    if (!Number.isFinite(sim.transform.x) || !Number.isFinite(sim.transform.y)) {
+      const entry = simLot(world, sim).entryMarkers[0] ?? { x: 2, y: 2 };
+      sim.transform.x = entry.x;
+      sim.transform.y = entry.y;
+      sim.path.waypoints = [];
+      sim.path.index = 0;
+      sim.action = { kind: 'idle' };
+      continue;
+    }
     if (sim.action.kind !== 'pathing') {
       if (sim.path.waypoints.length === 0) {
         if (sim.anim.clip === 'walk') sim.anim.clip = 'idle';
@@ -495,6 +551,14 @@ export function systemPath(world: World, content: ContentPack): void {
     const wps = sim.path.waypoints;
     if (sim.path.index >= wps.length) {
       // arrived
+      // Pure player walk-to: stop, no object interaction
+      if (sim.action.interactionId === '__walk__') {
+        sim.path.waypoints = [];
+        sim.path.index = 0;
+        sim.anim.clip = 'idle';
+        sim.action = { kind: 'idle' };
+        continue;
+      }
       const idef = getDef(content, sim.action.interactionId);
       if (!idef) {
         failAction(world, sim, sim.action.interactionId, 'target_invalid');
@@ -525,16 +589,22 @@ export function systemPath(world: World, content: ContentPack): void {
       continue;
     }
     const target = wps[sim.path.index];
+    if (!target || !Number.isFinite(target.x) || !Number.isFinite(target.y)) {
+      sim.path.waypoints = [];
+      sim.path.index = 0;
+      failAction(world, sim, sim.action.interactionId, 'path_impossible');
+      continue;
+    }
     const dx = target.x - sim.transform.x;
     const dy = target.y - sim.transform.y;
     const dist = Math.hypot(dx, dy);
     sim.anim.clip = 'walk';
-    if (dist < 0.05) {
+    if (dist < 0.05 || dist === 0) {
       sim.transform.x = target.x;
       sim.transform.y = target.y;
       sim.path.index += 1;
     } else {
-      const step = Math.min(sim.path.speed, dist);
+      const step = Math.min(sim.path.speed || 0.15, dist);
       sim.transform.x += (dx / dist) * step;
       sim.transform.y += (dy / dist) * step;
       if (Math.abs(dx) > Math.abs(dy)) {
@@ -578,101 +648,10 @@ export function systemPerforming(world: World, content: ContentPack): void {
       interactionId: idef.id,
     });
     sim.action = { kind: 'succeeded', interactionId: idef.id };
-  }
-}
-
-export function systemAutonomy(world: World, content: ContentPack): void {
-  for (const sim of allSims(world)) {
-    if (sim.presence !== 'on_lot') continue;
-    if (sim.socialLock) continue;
-    if (world.clock.tick < sim.autonomy.nextPlanTick) continue;
-    if (sim.action.kind !== 'idle' || sim.queue.items.length > 0) continue;
-    if (world.clock.tick < sim.autonomy.cooldownUntil) continue;
-
-    type Cand = { interactionId: string; targetId: EntityId | null; score: number };
-    const cands: Cand[] = [];
-
-    // Object affordances
-    for (const obj of allObjects(world)) {
-      const odef = getObjectDef(content, obj.defId);
-      if (!odef) continue;
-      for (const iid of odef.interactions) {
-        const idef = getDef(content, iid);
-        if (!idef || idef.social) continue;
-        if (idef.slotTag) {
-          const free = obj.slots.some((s) => {
-            const sd = odef.slots.find((d) => d.id === s.slotId);
-            return (
-              sd?.tags.includes(idef.slotTag!) &&
-              (!sd.exclusive || s.reservedBy === null)
-            );
-          });
-          if (!free) continue;
-        }
-        if (idef.requires?.heldItem && sim.inventory.held !== idef.requires.heldItem) {
-          continue;
-        }
-        if (idef.requires?.skill) {
-          if ((sim.skills[idef.requires.skill.id] ?? 0) < idef.requires.skill.min) continue;
-        }
-        let score = idef.autonomyWeight ?? 1;
-        if (idef.ads) {
-          for (const k of NEED_KEYS) {
-            const w = idef.ads[k] ?? 0;
-            score += w * (100 - sim.needs[k]) * 0.02;
-          }
-        }
-        score += sim.mood.value * 0.01;
-        const dist =
-          Math.abs(obj.transform.x - sim.transform.x) +
-          Math.abs(obj.transform.y - sim.transform.y);
-        score -= dist * 0.05;
-        cands.push({ interactionId: iid, targetId: obj.id, score });
-      }
-    }
-
-    // Social
-    for (const other of allSims(world)) {
-      if (other.id === sim.id || other.presence !== 'on_lot') continue;
-      if (other.socialLock) continue;
-      for (const idef of content.interactions) {
-        if (!idef.social) continue;
-        let score = (idef.autonomyWeight ?? 1) + (100 - sim.needs.social) * 0.03;
-        cands.push({ interactionId: idef.id, targetId: other.id, score });
-      }
-    }
-
-    // Deterministic: sort by id first, score with noise, pick best
-    cands.sort((a, b) => {
-      if (a.interactionId !== b.interactionId)
-        return a.interactionId < b.interactionId ? -1 : 1;
-      return (a.targetId ?? -1) - (b.targetId ?? -1);
+    getObs().noteActionResult(true, {
+      simId: sim.id,
+      interactionId: idef.id,
     });
-    for (const c of cands) {
-      c.score += nextRng(world.rng) * 2;
-    }
-    let best: Cand | null = null;
-    for (const c of cands) {
-      if (
-        !best ||
-        c.score > best.score ||
-        (c.score === best.score && c.interactionId < best.interactionId) ||
-        (c.score === best.score &&
-          c.interactionId === best.interactionId &&
-          (c.targetId ?? -1) < (best.targetId ?? -1))
-      ) {
-        best = c;
-      }
-    }
-    if (best) {
-      sim.queue.items.push({
-        interactionId: best.interactionId,
-        targetId: best.targetId,
-        playerQueued: false,
-      });
-    }
-    // Stagger next plan
-    sim.autonomy.nextPlanTick = world.clock.tick + 15 + Math.floor(nextRng(world.rng) * 20);
   }
 }
 
@@ -683,28 +662,70 @@ export function systemFailsafe(world: World): void {
     }
     if (sim.needs.energy <= 0) {
       sim.anim.clip = 'pass_out';
-      sim.needs.energy = 5;
+      sim.needs.energy = 12;
+      sim.autonomy.nextPlanTick = world.clock.tick;
+      sim.autonomy.cooldownUntil = 0;
+      // Clear stuck failed state so they can seek bed
+      if (sim.action.kind === 'failed' || sim.action.kind === 'idle') {
+        sim.action = { kind: 'idle' };
+      }
       world.eventBus.push({
         type: 'toast',
         message: `${sim.identity.firstName} passed out from exhaustion!`,
       });
     }
+    // Faster recovery after failed autonomy so they retry
+    if (sim.action.kind === 'failed' && !sim.queue.items.some((q) => q.playerQueued)) {
+      sim.autonomy.nextPlanTick = Math.min(
+        sim.autonomy.nextPlanTick,
+        world.clock.tick + 2,
+      );
+      sim.autonomy.cooldownUntil = 0;
+    }
+  }
+  systemSurvivalSafety(world);
+}
+
+function timedSystem(name: string, fn: () => void): void {
+  const obs = getObs();
+  const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  try {
+    fn();
+  } catch (e) {
+    obs.logger.error('system', `System ${name} threw`, {
+      error: e instanceof Error ? e.message : String(e),
+    });
+    throw e;
+  } finally {
+    const t1 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    obs.recordSystemTime(name, t1 - t0);
   }
 }
 
-/** Ordered sim tick — design doc systems order */
+/** Ordered sim tick — design doc systems order + per-system timing */
 export function runSimTick(world: World, content: ContentPack): void {
   if (world.mode !== 'live') return;
   if (world.clock.paused || world.clock.speed === 0) return;
 
-  systemTime(world);
-  systemCareerSchedule(world, content);
-  systemNeedDecay(world, content);
-  systemMood(world);
-  systemInteractionProgress(world, content);
-  systemPath(world, content);
-  systemPerforming(world, content);
-  systemAutonomy(world, content);
-  systemFailsafe(world);
-  refreshLotCaches(world);
+  const obs = getObs();
+  const spanId = obs.beginSimTick(world.clock.tick);
+
+  timedSystem('Time', () => systemTime(world));
+  timedSystem('CareerSchedule', () => systemCareerSchedule(world, content));
+  timedSystem('NeedDecay', () => systemNeedDecay(world, content));
+  timedSystem('Mood', () => systemMood(world));
+  timedSystem('InteractionProgress', () => systemInteractionProgress(world, content));
+  timedSystem('Path', () => systemPath(world, content));
+  timedSystem('Performing', () => systemPerforming(world, content));
+  timedSystem('Autonomy', () => systemAutonomy(world, content));
+  timedSystem('Failsafe', () => systemFailsafe(world));
+  // Lot walkability is rebuilt on place/delete/wall edit only (not every tick).
+
+  const sims = allSims(world);
+  const objects = allObjects(world);
+  obs.endSimTick(spanId, {
+    sims: sims.length,
+    objects: objects.length,
+    relationships: world.relationships.length,
+  });
 }

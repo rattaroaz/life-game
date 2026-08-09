@@ -1,5 +1,11 @@
 import { createClock } from './clock.js';
-import { createLot, recomputeLotDerived, type FootprintStamp } from './lot.js';
+import { recomputeLotDerived, type FootprintStamp } from './lot.js';
+import {
+  createNeighborhood,
+  furnishNeighborhood,
+  objectsInPlace,
+  refreshPlaceCaches,
+} from './neighborhood.js';
 import { createRng } from './rng.js';
 import type {
   ContentPack,
@@ -23,11 +29,15 @@ export const DEFAULT_NEEDS: Needs = {
 };
 
 export function createEmptyWorld(seed = 42): World {
+  const { neighborhood, lots } = createNeighborhood();
+  const active = neighborhood.activePlaceId;
   return {
     nextId: 1,
     entities: new Map(),
     relationships: [],
-    lot: createLot(32, 32),
+    lot: lots[active]!,
+    lots,
+    neighborhood,
     household: { name: 'New Household', funds: 20000, memberIds: [] },
     clock: createClock(8 * 60),
     rng: createRng(seed),
@@ -77,8 +87,24 @@ export function allObjects(world: World): ObjectEntity[] {
   return out;
 }
 
-export function stampObjects(world: World): FootprintStamp[] {
-  return allObjects(world).map((o) => ({
+/** Objects in the currently viewed place */
+export function activeObjects(world: World): ObjectEntity[] {
+  return objectsInPlace(world, world.neighborhood.activePlaceId);
+}
+
+/** Sims currently in the active place and on_lot (or at_work shown at home door) */
+export function activeSims(world: World): SimEntity[] {
+  const placeId = world.neighborhood.activePlaceId;
+  return allSims(world).filter(
+    (s) =>
+      s.placeId === placeId ||
+      (s.presence === 'at_work' && placeId === world.neighborhood.homePlaceId),
+  );
+}
+
+export function stampObjects(world: World, placeId?: string): FootprintStamp[] {
+  const pid = placeId ?? world.neighborhood.activePlaceId;
+  return objectsInPlace(world, pid).map((o) => ({
     x: o.transform.x,
     y: o.transform.y,
     w: o.footprint.w,
@@ -89,7 +115,8 @@ export function stampObjects(world: World): FootprintStamp[] {
 }
 
 export function refreshLotCaches(world: World): void {
-  recomputeLotDerived(world.lot, stampObjects(world));
+  refreshPlaceCaches(world, world.neighborhood.activePlaceId);
+  world.lot = world.lots[world.neighborhood.activePlaceId]!;
 }
 
 export function spawnSim(
@@ -99,15 +126,18 @@ export function spawnSim(
     lastName: string;
     x: number;
     y: number;
+    placeId?: string;
     visual?: Partial<SimVisual>;
     traits?: string[];
     aspirationId?: string;
   },
 ): SimEntity {
   const id = allocId(world);
+  const placeId = opts.placeId ?? world.neighborhood.homePlaceId;
   const sim: SimEntity = {
     kind: 'sim',
     id,
+    placeId,
     transform: { x: opts.x, y: opts.y, zFloor: 0, facing: 0 },
     identity: {
       firstName: opts.firstName,
@@ -157,12 +187,14 @@ export function spawnObject(
   x: number,
   y: number,
   rot: 0 | 1 | 2 | 3 = 0,
+  placeId?: string,
 ): ObjectEntity | null {
-  // Validate approach tiles roughly
   const id = allocId(world);
+  const pid = placeId ?? world.neighborhood.activePlaceId;
   const obj: ObjectEntity = {
     kind: 'object',
     id,
+    placeId: pid,
     transform: { x, y, zFloor: 0, rot },
     defId: def.id,
     quality: 5,
@@ -178,7 +210,10 @@ export function spawnObject(
     })),
   };
   world.entities.set(id, obj);
-  refreshLotCaches(world);
+  refreshPlaceCaches(world, pid);
+  if (pid === world.neighborhood.activePlaceId) {
+    world.lot = world.lots[pid]!;
+  }
   return obj;
 }
 
@@ -186,11 +221,14 @@ export function debugSpawnHousehold(world: World, content: ContentPack): void {
   world.household.name = 'Demo Household';
   world.household.funds = 25000;
 
+  furnishNeighborhood(world, content);
+
   const a = spawnSim(world, {
     firstName: 'Alex',
     lastName: 'Rivera',
     x: 12,
     y: 14,
+    placeId: 'home',
     traits: ['trait.cheerful'],
     aspirationId: 'aspiration.friendly',
     visual: {
@@ -205,6 +243,7 @@ export function debugSpawnHousehold(world: World, content: ContentPack): void {
     lastName: 'Lee',
     x: 15,
     y: 14,
+    placeId: 'home',
     traits: ['trait.foodie'],
     aspirationId: 'aspiration.master_chef',
     visual: {
@@ -214,6 +253,20 @@ export function debugSpawnHousehold(world: World, content: ContentPack): void {
       skinTone: 'tone_2',
     },
   });
+  a.career = {
+    trackId: 'career.office_worker',
+    level: 0,
+    performance: 55,
+    daysWorked: 0,
+  };
+  b.career = {
+    trackId: 'career.chef',
+    level: 0,
+    performance: 55,
+    daysWorked: 0,
+  };
+  a.autonomy.nextPlanTick = 0;
+  b.autonomy.nextPlanTick = 1;
   ensureRelationship(world.relationships, a.id, b.id);
   const edge = world.relationships.find(
     (e) =>
@@ -221,23 +274,7 @@ export function debugSpawnHousehold(world: World, content: ContentPack): void {
   );
   if (edge) edge.friendship = 40;
 
-  const place = (id: string, x: number, y: number) => {
-    const def = content.objects.find((o) => o.id === id);
-    if (def) spawnObject(world, def, x, y);
-  };
-  place('object.fridge_basic', 9, 9);
-  place('object.stove_basic', 11, 9);
-  place('object.counter_basic', 10, 9);
-  place('object.table_dining', 14, 12);
-  place('object.chair_dining', 14, 13);
-  place('object.chair_dining', 15, 12);
-  place('object.bed_double', 18, 10);
-  place('object.toilet_basic', 9, 17);
-  place('object.shower_basic', 11, 17);
-  place('object.sofa_basic', 16, 16);
-  place('object.tv_basic', 16, 18);
-  place('object.bookshelf', 19, 16);
-  place('object.desk_computer', 20, 12);
-  place('object.plant_pot', 13, 10);
-  place('object.sink_basic', 10, 17);
+  world.neighborhood.activePlaceId = 'home';
+  world.lot = world.lots.home!;
+  refreshLotCaches(world);
 }

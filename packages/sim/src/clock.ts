@@ -1,12 +1,17 @@
 /**
- * Clock Contract (design doc):
+ * Clock Contract:
  * - 1 tick = 1 game minute
- * - 1× speed = 1 tick per real second
+ * - 1× speed = BASE_TICKS_PER_REAL_SECOND ticks per real second
+ * - 2× / 3× multiply that base rate
  * - GAME_DAY_TICKS = 1440
+ *
+ * BASE is 6 so 1× is twice as fast as the old 3× (which was 3 ticks/s).
+ * Real-time at 1×: ~4 min game-hour, ~1.6 h game-day.
  */
 
 export const TICK_GAME_MINUTES = 1;
-export const BASE_TICKS_PER_REAL_SECOND = 1;
+/** Game minutes advanced per real second at 1× speed. */
+export const BASE_TICKS_PER_REAL_SECOND = 6;
 export const GAME_DAY_TICKS = 1440;
 export const GAME_WEEK_DAYS = 7;
 

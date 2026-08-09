@@ -11,8 +11,10 @@
     "dev": "npm run dev -w @lifesim/desktop",
     "build": "npm run build -w @lifesim/shared && npm run build -w @lifesim/content && npm run build -w @lifesim/sim && npm run build -w @lifesim/render && npm run build -w @lifesim/desktop",
     "typecheck": "npm run typecheck -w @lifesim/shared && npm run typecheck -w @lifesim/sim && npm run typecheck -w @lifesim/content && npm run typecheck -w @lifesim/render && npm run typecheck -w @lifesim/desktop",
-    "test": "npm run test -w @lifesim/sim",
-    "tauri": "npm run tauri -w @lifesim/desktop",
+    "test": "npm run test -w @lifesim/shared && npm run test -w @lifesim/sim && npm run test -w @lifesim/content",
+    "test:sim": "npm run test -w @lifesim/sim",
+    "test:watch": "npm run test -w @lifesim/sim -- --watch",
+    "tauri": "npm run tauri -w @lifesim/desktop --",
     "tauri:dev": "npm run tauri:dev -w @lifesim/desktop",
     "tauri:build": "npm run tauri:build -w @lifesim/desktop"
   },

@@ -163,6 +163,17 @@ pub fn run() {
             get_asset,
             get_app_paths
         ])
+        .setup(|app| {
+            #[cfg(debug_assertions)]
+            {
+                use tauri::Manager;
+                if let Some(win) = app.get_webview_window("main") {
+                    // Right-click inspect / F12-style tools for blank-screen diagnosis
+                    win.open_devtools();
+                }
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running LifeSim");
 }

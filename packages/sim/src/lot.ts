@@ -32,6 +32,7 @@ export function inBounds(lot: LotState, x: number, y: number): boolean {
   return x >= 0 && y >= 0 && x < lot.width && y < lot.height;
 }
 
+/** Empty lot shell — neighborhood builders paint geometry. */
 export function createLot(width = 32, height = 32, id = 'lot_starter'): LotState {
   const cells = width * height;
   const lot: LotState = {
@@ -43,38 +44,10 @@ export function createLot(width = 32, height = 32, id = 'lot_starter'): LotState
     walls: [],
     walkable: new Uint8Array(cells),
     roomOfCell: new Int16Array(cells),
-    entryMarkers: [{ x: 2, y: 2 }],
+    entryMarkers: [{ x: Math.floor(width / 2), y: Math.floor(height / 2) }],
     objectsAt: new Map(),
   };
-  // Default outdoor grass
   for (let i = 0; i < cells; i++) lot.floorCover[i] = 1;
-  // Simple starter house interior: floor tiles in center
-  for (let y = 8; y < 20; y++) {
-    for (let x = 8; x < 22; x++) {
-      lot.floorCover[cellIndex(lot, x, y)] = 2; // wood floor
-    }
-  }
-  // Perimeter walls around house
-  for (let x = 8; x < 22; x++) {
-    lot.walls.push({ x, y: 8, dir: 'h', kind: 'wall' });
-    lot.walls.push({ x, y: 20, dir: 'h', kind: 'wall' });
-  }
-  for (let y = 8; y < 20; y++) {
-    lot.walls.push({ x: 8, y, dir: 'v', kind: 'wall' });
-    lot.walls.push({ x: 22, y, dir: 'v', kind: 'wall' });
-  }
-  // Front door south
-  lot.walls = lot.walls.filter(
-    (w) => !(w.dir === 'h' && w.y === 20 && w.x === 14),
-  );
-  lot.walls.push({ x: 14, y: 20, dir: 'h', kind: 'door' });
-  // A window
-  lot.walls = lot.walls.filter(
-    (w) => !(w.dir === 'h' && w.y === 8 && w.x === 12),
-  );
-  lot.walls.push({ x: 12, y: 8, dir: 'h', kind: 'window' });
-
-  lot.entryMarkers = [{ x: 14, y: 21 }];
   recomputeLotDerived(lot, []);
   return lot;
 }

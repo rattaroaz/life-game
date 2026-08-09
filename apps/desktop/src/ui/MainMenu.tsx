@@ -36,7 +36,7 @@ export function MainMenu() {
         </div>
         <p className="help-hint">
           Controls: click Sim/object · WASD/middle-mouse pan · wheel zoom · Live / Build / Buy modes ·
-          1–3 speed keys after start
+          1–3 speed keys after start · <strong>F3</strong> observability overlay · F4 export dump
         </p>
       </div>
     </div>

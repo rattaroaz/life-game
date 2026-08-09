@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default LifeSim capabilities","local":true,"windows":["main"],"permissions":["core:default","fs:default","fs:allow-appdata-read","fs:allow-appdata-write","fs:allow-appdata-read-recursive","fs:allow-appdata-write-recursive"]}}
