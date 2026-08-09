@@ -174,7 +174,7 @@ export function spawnSim(
       progress: 0,
       completedMilestones: [],
     },
-    career: { trackId: null, level: 0, performance: 50, daysWorked: 0 },
+    career: { trackId: null, level: 0, performance: 50, daysWorked: 0, skipCount: 0 },
     inventory: { held: null },
     queue: { items: [] },
     action: { kind: 'idle' },
@@ -268,12 +268,14 @@ export function debugSpawnHousehold(world: World, content: ContentPack): void {
     level: 0,
     performance: 55,
     daysWorked: 0,
+    skipCount: 0,
   };
   b.career = {
     trackId: 'career.chef',
     level: 0,
     performance: 55,
     daysWorked: 0,
+    skipCount: 0,
   };
   a.autonomy.nextPlanTick = 0;
   b.autonomy.nextPlanTick = 1;

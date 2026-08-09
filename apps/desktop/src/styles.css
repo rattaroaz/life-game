@@ -294,12 +294,62 @@ input, select {
   max-width: 320px;
 }
 .toast {
+  display: block;
+  width: 100%;
+  text-align: left;
   background: #1e1b4b;
   border: 1px solid var(--accent2);
   padding: 8px 12px;
   border-radius: 8px;
   font-size: 13px;
+  color: #e2e8f0;
+  cursor: pointer;
   animation: fadein 0.2s ease;
+}
+.toast:hover {
+  border-color: var(--accent);
+  background: #2e1065;
+}
+
+.confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(8, 10, 20, 0.55);
+  backdrop-filter: blur(3px);
+  padding: 16px;
+}
+.confirm-modal {
+  width: min(400px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  padding: 18px 20px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+.confirm-modal h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  color: #f8fafc;
+}
+.confirm-modal p {
+  margin: 0;
+  font-size: 14px;
+  color: #e2e8f0;
+  line-height: 1.4;
+}
+.confirm-detail {
+  margin-top: 8px !important;
+  font-size: 12px !important;
+  color: var(--muted) !important;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
 }
 @keyframes fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
@@ -358,6 +408,82 @@ input, select {
 }
 .catalog-item .price { color: var(--ok); }
 .interaction-list { display: flex; flex-direction: column; gap: 4px; }
+.people-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow: auto;
+  margin-bottom: 4px;
+}
+.person-row {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 8px;
+  background: #0f172a;
+  padding: 2px;
+}
+.person-row.here {
+  border-color: rgba(94, 234, 212, 0.35);
+}
+.person-info {
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 6px 8px;
+  cursor: pointer;
+  color: inherit;
+}
+.person-info:hover .person-name { color: var(--accent); }
+.person-name {
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.person-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #5eead4;
+  border: 1px solid rgba(94, 234, 212, 0.35);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.person-meta {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.person-talk {
+  align-self: center;
+  margin-right: 4px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(94, 234, 212, 0.12);
+  border: 1px solid rgba(94, 234, 212, 0.4);
+  color: #5eead4;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.person-talk:hover:not(:disabled) {
+  background: rgba(94, 234, 212, 0.22);
+}
+.person-talk:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.talk-primary {
+  background: rgba(94, 234, 212, 0.14) !important;
+  border-color: rgba(94, 234, 212, 0.45) !important;
+  color: #5eead4 !important;
+  font-weight: 700;
+}
 .npc-card {
   margin-bottom: 8px;
   padding: 8px 10px;

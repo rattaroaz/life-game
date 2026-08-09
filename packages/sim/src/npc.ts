@@ -5,7 +5,7 @@ import type { ContentPack, EntityId, NpcDef, Needs, SimEntity, World } from './t
 import { allSims, spawnSim } from './world.js';
 
 const NEED_KEYS = ['hunger', 'energy', 'bladder', 'hygiene', 'fun', 'social'] as const;
-const CRITICAL = 22;
+const CRITICAL = 28;
 
 function hasCriticalNeeds(needs: Needs): boolean {
   return NEED_KEYS.some((k) => needs[k] < CRITICAL);
@@ -69,7 +69,7 @@ export function spawnNpc(world: World, def: NpcDef): SimEntity | null {
     householdMember: false,
   });
   // NPCs never join player careers
-  sim.career = { trackId: null, level: 0, performance: 50, daysWorked: 0 };
+  sim.career = { trackId: null, level: 0, performance: 50, daysWorked: 0, skipCount: 0 };
   return sim;
 }
 

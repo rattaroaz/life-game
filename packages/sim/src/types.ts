@@ -31,6 +31,8 @@ export type CareerState = {
   level: number;
   performance: number;
   daysWorked: number;
+  /** Player pulled them off work during a shift — too many → fired */
+  skipCount: number;
 };
 
 export type InventoryState = {
@@ -360,6 +362,18 @@ export type HudProjection = {
     placeId: string;
     placeName: string;
     needs: Needs;
+  }[];
+  /** NPCs and other Sims the player can talk to (same place first, then town). */
+  people: {
+    id: EntityId;
+    name: string;
+    role: SimRole;
+    placeId: string;
+    placeName: string;
+    here: boolean;
+    bio: string | null;
+    friendship: number;
+    met: boolean;
   }[];
   selectedSim: null | {
     id: EntityId;

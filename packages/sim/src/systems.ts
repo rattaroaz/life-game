@@ -1,4 +1,4 @@
-import { systemAutonomy, systemSurvivalSafety } from './autonomy.js';
+import { forceEmergencySelfCare, systemAutonomy, systemSurvivalSafety } from './autonomy.js';
 import { systemNpcRoutine } from './npc.js';
 import { advanceClock, isWeekend } from './clock.js';
 import type { LotState } from './lot.js';
@@ -8,7 +8,7 @@ import {
   travelSimToPlace,
 } from './neighborhood.js';
 import { getObs } from './observability/hub.js';
-import { findPath } from './pathfinding.js';
+import { findPath, nearestWalkable } from './pathfinding.js';
 import { addRelationshipDelta } from './relationships.js';
 import { nextRng } from './rng.js';
 import type {
@@ -425,6 +425,10 @@ export function systemInteractionProgress(world: World, content: ContentPack): v
           continue;
         }
         const lot = simLot(world, sim);
+        const start = {
+          x: Math.round(sim.transform.x),
+          y: Math.round(sim.transform.y),
+        };
         const goal = {
           x: Math.round(partner.transform.x),
           y: Math.round(partner.transform.y),
@@ -434,15 +438,29 @@ export function systemInteractionProgress(world: World, content: ContentPack): v
           { x: goal.x - 1, y: goal.y },
           { x: goal.x, y: goal.y + 1 },
           { x: goal.x, y: goal.y - 1 },
+          { x: goal.x + 1, y: goal.y + 1 },
+          { x: goal.x - 1, y: goal.y - 1 },
+          { x: goal.x + 1, y: goal.y - 1 },
+          { x: goal.x - 1, y: goal.y + 1 },
         ];
         let bestPath: { x: number; y: number }[] | null = null;
         for (const n of neigh) {
-          const p = findPath(
-            lot,
-            { x: Math.round(sim.transform.x), y: Math.round(sim.transform.y) },
-            n,
-          );
+          const p = findPath(lot, start, n);
           if (p && (!bestPath || p.length < bestPath.length)) bestPath = p;
+        }
+        // Fallback: stand next to them on any nearby walkable tile
+        if (!bestPath) {
+          const near = nearestWalkable(lot, goal.x, goal.y, 4);
+          if (near && !(near.x === start.x && near.y === start.y)) {
+            bestPath = findPath(lot, start, near);
+          }
+        }
+        // Already beside them
+        if (
+          !bestPath &&
+          Math.abs(start.x - goal.x) + Math.abs(start.y - goal.y) <= 1
+        ) {
+          bestPath = [];
         }
         if (!bestPath) {
           failAction(world, sim, idef.id, 'path_impossible');
@@ -657,24 +675,33 @@ export function systemPerforming(world: World, content: ContentPack): void {
   }
 }
 
-export function systemFailsafe(world: World): void {
+export function systemFailsafe(world: World, content: ContentPack): void {
   for (const sim of allSims(world)) {
     if (sim.socialLock && sim.socialLock.untilTick < world.clock.tick) {
       clearSocialPair(world, sim);
     }
-    if (sim.needs.energy <= 0) {
-      sim.anim.clip = 'pass_out';
-      sim.needs.energy = 12;
+    // Never pass out — force self-care before collapse
+    if (sim.needs.energy <= 8 && sim.presence === 'on_lot') {
+      if (sim.anim.clip === 'pass_out') sim.anim.clip = 'idle';
+      sim.needs.energy = Math.max(sim.needs.energy, 12);
       sim.autonomy.nextPlanTick = world.clock.tick;
       sim.autonomy.cooldownUntil = 0;
-      // Clear stuck failed state so they can seek bed
-      if (sim.action.kind === 'failed' || sim.action.kind === 'idle') {
-        sim.action = { kind: 'idle' };
+      if (
+        sim.action.kind === 'failed' ||
+        sim.action.kind === 'idle' ||
+        sim.action.kind === 'succeeded' ||
+        (sim.action.kind === 'pathing' && sim.action.interactionId === '__walk__')
+      ) {
+        // Drop pure walks so they can seek a bed / rest
+        if (sim.action.kind === 'pathing') {
+          sim.path.waypoints = [];
+          sim.path.index = 0;
+          sim.action = { kind: 'idle' };
+        } else {
+          sim.action = { kind: 'idle' };
+        }
+        forceEmergencySelfCare(world, content, sim);
       }
-      world.eventBus.push({
-        type: 'toast',
-        message: `${sim.identity.firstName} passed out from exhaustion!`,
-      });
     }
     // Faster recovery after failed autonomy so they retry
     if (sim.action.kind === 'failed' && !sim.queue.items.some((q) => q.playerQueued)) {
@@ -685,7 +712,7 @@ export function systemFailsafe(world: World): void {
       sim.autonomy.cooldownUntil = 0;
     }
   }
-  systemSurvivalSafety(world);
+  systemSurvivalSafety(world, content);
 }
 
 function timedSystem(name: string, fn: () => void): void {
@@ -721,7 +748,7 @@ export function runSimTick(world: World, content: ContentPack): void {
   timedSystem('Performing', () => systemPerforming(world, content));
   timedSystem('NpcRoutine', () => systemNpcRoutine(world, content));
   timedSystem('Autonomy', () => systemAutonomy(world, content));
-  timedSystem('Failsafe', () => systemFailsafe(world));
+  timedSystem('Failsafe', () => systemFailsafe(world, content));
   // Lot walkability is rebuilt on place/delete/wall edit only (not every tick).
 
   const sims = allSims(world);

@@ -29,13 +29,27 @@ initObs({
 
 export type Screen = 'menu' | 'cas' | 'game';
 
+export type ToastItem = {
+  id: number;
+  message: string;
+};
+
+export type ConfirmDialogState = {
+  title: string;
+  message: string;
+  detail?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+};
+
 type GameStore = {
   screen: Screen;
   content: ContentPack;
   world: World | null;
   commands: SimCommands | null;
   hud: HudProjection | null;
-  toasts: string[];
+  toasts: ToastItem[];
+  confirmDialog: ConfirmDialogState | null;
   selectedBuyDef: string | null;
   buildKind: 'wall' | 'door' | 'window' | 'erase';
   saves: ReturnType<typeof listLocalSaves>;
@@ -52,6 +66,9 @@ type GameStore = {
   refreshSaves: () => void;
   frame: (dt: number) => void;
   pushToast: (msg: string) => void;
+  dismissToast: (id: number) => void;
+  askConfirm: (dialog: ConfirmDialogState) => Promise<boolean>;
+  resolveConfirm: (ok: boolean) => void;
   setSelectedBuyDef: (id: string | null) => void;
   setBuildKind: (k: GameStore['buildKind']) => void;
   reproject: () => void;
@@ -61,6 +78,10 @@ type GameStore = {
 let tickAccum = 0;
 let projectAccum = 0;
 const PROJECT_INTERVAL = 0.1; // HUD refresh ~10 Hz
+const TOAST_MS = 10_000;
+let toastSeq = 1;
+const toastTimers = new Map<number, number>();
+let confirmResolver: ((ok: boolean) => void) | null = null;
 
 export const useGameStore = create<GameStore>((set, get) => {
   let content: ContentPack;
@@ -91,6 +112,7 @@ export const useGameStore = create<GameStore>((set, get) => {
     commands: null,
     hud: null,
     toasts: [],
+    confirmDialog: null,
     selectedBuyDef: null,
     buildKind: 'wall',
     saves: [],
@@ -105,10 +127,41 @@ export const useGameStore = create<GameStore>((set, get) => {
     },
 
     pushToast(msg) {
-      set((s) => ({ toasts: [...s.toasts.slice(-4), msg] }));
-      window.setTimeout(() => {
-        set((s) => ({ toasts: s.toasts.filter((t) => t !== msg) }));
-      }, 4000);
+      const id = toastSeq++;
+      const item: ToastItem = { id, message: msg };
+      set((s) => ({ toasts: [...s.toasts.slice(-4), item] }));
+      const timer = window.setTimeout(() => {
+        toastTimers.delete(id);
+        get().dismissToast(id);
+      }, TOAST_MS);
+      toastTimers.set(id, timer);
+    },
+
+    dismissToast(id) {
+      const timer = toastTimers.get(id);
+      if (timer != null) {
+        window.clearTimeout(timer);
+        toastTimers.delete(id);
+      }
+      set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+    },
+
+    askConfirm(dialog) {
+      if (confirmResolver) {
+        confirmResolver(false);
+        confirmResolver = null;
+      }
+      set({ confirmDialog: dialog });
+      return new Promise<boolean>((resolve) => {
+        confirmResolver = resolve;
+      });
+    },
+
+    resolveConfirm(ok) {
+      const resolve = confirmResolver;
+      confirmResolver = null;
+      set({ confirmDialog: null });
+      resolve?.(ok);
     },
 
     reproject() {
@@ -116,7 +169,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       if (!world) return;
       try {
         const t0 = performance.now();
-        set({ hud: projectHud(world, c, toasts) });
+        set({ hud: projectHud(world, c, toasts.map((t) => t.message)) });
         getObs().metrics.observe('ui.project.ms', performance.now() - t0);
       } catch (e) {
         getObs().logger.error('ui', 'reproject failed', {
@@ -137,10 +190,11 @@ export const useGameStore = create<GameStore>((set, get) => {
           world,
           commands,
           worldEpoch: s.worldEpoch + 1,
-          toasts: [
-            'Welcome! Sims care for themselves — watch or step in anytime. F3 = debug.',
-          ],
+          toasts: [],
         }));
+        get().pushToast(
+          'Welcome! Sims care for themselves — watch or step in anytime. F3 = debug.',
+        );
         getObs().event('game.start', 'ui', { mode: 'demo' });
         get().reproject();
       } catch (e) {
@@ -168,8 +222,9 @@ export const useGameStore = create<GameStore>((set, get) => {
           world,
           commands,
           worldEpoch: s.worldEpoch + 1,
-          toasts: [`${householdName} moved in!`],
+          toasts: [],
         }));
+        get().pushToast(`${householdName} moved in!`);
         getObs().event('game.start', 'ui', {
           mode: 'cas',
           members: members.length,
@@ -219,8 +274,9 @@ export const useGameStore = create<GameStore>((set, get) => {
           world,
           commands,
           worldEpoch: s.worldEpoch + 1,
-          toasts: ['Game loaded'],
+          toasts: [],
         }));
+        get().pushToast('Game loaded');
         get().refreshSaves();
         getObs().event('game.loaded', 'save', { slotId });
         get().reproject();

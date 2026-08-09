@@ -494,7 +494,7 @@ const interactions: InteractionDef[] = [
   // Social
   {
     id: 'interact.chat',
-    nameKey: 'Chat',
+    nameKey: 'Talk',
     durationTicks: 20,
     social: true,
     outcomes: {

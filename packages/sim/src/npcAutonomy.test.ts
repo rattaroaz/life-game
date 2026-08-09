@@ -123,6 +123,7 @@ describe('NPC self-sufficiency', () => {
 
     expect(collapsed).toBeLessThan(N * npcs.length * 0.4);
     for (const n of npcs) {
+      expect(n.anim.clip).not.toBe('pass_out');
       for (const v of Object.values(n.needs)) {
         expect(v).toBeGreaterThanOrEqual(0);
         expect(v).toBeLessThanOrEqual(100);

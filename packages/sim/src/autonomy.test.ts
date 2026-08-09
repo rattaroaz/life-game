@@ -98,4 +98,32 @@ describe('self-sufficient autonomy', () => {
     systemAutonomy(world, content);
     expect(sim.career.trackId).not.toBeNull();
   });
+
+  it('never passes out — seeks rest when energy collapses', () => {
+    const content = minimalContent();
+    const world = makeTestWorld(11);
+    const { simA } = spawnTestPair(world, content);
+    const sim = getSim(world, simA)!;
+    sim.needs.energy = 0;
+    sim.needs.hunger = 70;
+    sim.needs.bladder = 70;
+    sim.action = { kind: 'idle' };
+    sim.queue.items = [];
+    sim.autonomy.nextPlanTick = 0;
+    sim.autonomy.cooldownUntil = 0;
+    world.mode = 'live';
+    world.clock.paused = false;
+    world.clock.speed = 1;
+
+    for (let i = 0; i < 6; i++) runSimTick(world, content);
+
+    expect(sim.anim.clip).not.toBe('pass_out');
+    expect(sim.needs.energy).toBeGreaterThan(0);
+    const resting =
+      sim.queue.items.some((q) => /sleep|bed/i.test(q.interactionId)) ||
+      (sim.action.kind === 'pathing' && /sleep/i.test(sim.action.interactionId)) ||
+      (sim.action.kind === 'performing' && /sleep/i.test(sim.action.interactionId)) ||
+      (sim.action.kind === 'pending' && /sleep/i.test(sim.action.interactionId));
+    expect(resting).toBe(true);
+  });
 });

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { WorldView } from '@lifesim/render';
 import { getObs } from '@lifesim/sim';
+import { runPlayerAction } from '../game/playerAction';
 import { useGameStore } from '../game/store';
+import { ConfirmDialog } from './ConfirmDialog';
 import { Hud } from './Hud';
 
 export function GameScreen() {
@@ -57,14 +59,30 @@ export function GameScreen() {
           if (entityId != null) {
             const ent = w.entities.get(entityId);
             if (ent?.kind === 'sim') {
-              // NPCs are interaction targets only — never become the controlled Sim
               if (ent.role === 'household') {
                 cmd.selectSim(entityId);
+                cmd.setWorldTarget(entityId);
+                reproject();
+                return;
               }
+
+              // NPC click: selected Sim goes talk with them (travel if needed)
               cmd.setWorldTarget(entityId);
-            } else {
-              cmd.setWorldTarget(entityId);
+              const selectedId = w.ui.selectedSimId;
+              if (w.mode !== 'live' || selectedId == null) {
+                reproject();
+                return;
+              }
+              void runPlayerAction(selectedId, () => {
+                cmd.talkTo(entityId, selectedId);
+                for (const m of cmd.drainEvents()) {
+                  useGameStore.getState().pushToast(m);
+                }
+                reproject();
+              });
+              return;
             }
+            cmd.setWorldTarget(entityId);
           } else {
             cmd.setWorldTarget(null);
           }
@@ -112,13 +130,23 @@ export function GameScreen() {
             cmd.setWorldTarget(null);
           }
 
-          const ok = cmd.walkTo(tx, ty, walkerId);
-          if (!ok && (tx !== gx || ty !== gy)) {
-            cmd.drainEvents(); // keep only the final failure reason
-            cmd.walkTo(gx, gy, walkerId);
-          }
-          flushToasts();
-          reproject();
+          void runPlayerAction(walkerId, () => {
+            // Re-read after possible work interrupt (place/presence may change)
+            const w2 = useGameStore.getState().world;
+            if (w2?.ui.selectedSimId != null && walkerId != null) {
+              const sim = w2.entities.get(walkerId);
+              if (sim?.kind === 'sim' && sim.placeId !== w2.neighborhood.activePlaceId) {
+                cmd.viewPlace(sim.placeId);
+              }
+            }
+            const ok = cmd.walkTo(tx, ty, walkerId);
+            if (!ok && (tx !== gx || ty !== gy)) {
+              cmd.drainEvents();
+              cmd.walkTo(gx, gy, walkerId);
+            }
+            flushToasts();
+            reproject();
+          });
         } catch (e) {
           getObs().logger.error('input', 'double-click walk failed', {
             error: e instanceof Error ? e.message : String(e),
@@ -312,6 +340,7 @@ export function GameScreen() {
           </div>
         )}
         <Hud />
+        <ConfirmDialog />
       </div>
     </div>
   );

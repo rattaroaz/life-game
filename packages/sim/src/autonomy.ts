@@ -27,12 +27,18 @@ import { allObjects, allSims } from './world.js';
 const NEED_KEYS = ['hunger', 'energy', 'bladder', 'hygiene', 'fun', 'social'] as const;
 type NeedKey = (typeof NEED_KEYS)[number];
 
+/** Survival needs — must never bottom out into pass-out / free-fall. */
+const SURVIVAL_KEYS = ['hunger', 'energy', 'bladder', 'hygiene'] as const;
+type SurvivalKey = (typeof SURVIVAL_KEYS)[number];
+
 /** Below this, the need is "urgent" and dominates scoring. */
-const URGENT = 40;
-/** Below this, "critical" — plan every few ticks and prefer only fixes. */
-const CRITICAL = 22;
+const URGENT = 45;
+/** Below this, "critical" — plan every tick and prefer only fixes. */
+const CRITICAL = 28;
 /** Comfort zone: can practice skills / social. */
 const COMFORT = 55;
+/** Energy floor where we force emergency rest instead of passing out. */
+const ENERGY_COLLAPSE = 5;
 
 export type AutonomyCandidate = {
   interactionId: string;
@@ -118,6 +124,22 @@ function lowestNeed(needs: Needs): { key: NeedKey; value: number } {
 
 function hasCritical(needs: Needs): boolean {
   return NEED_KEYS.some((k) => needs[k] < CRITICAL);
+}
+
+function hasSurvivalCritical(needs: Needs): boolean {
+  return SURVIVAL_KEYS.some((k) => needs[k] < CRITICAL);
+}
+
+function lowestSurvivalNeed(needs: Needs): { key: SurvivalKey; value: number } {
+  let key: SurvivalKey = 'hunger';
+  let value = needs.hunger;
+  for (const k of SURVIVAL_KEYS) {
+    if (needs[k] < value) {
+      value = needs[k];
+      key = k;
+    }
+  }
+  return { key, value };
 }
 
 /** Player home or NPC personal home. */
@@ -254,6 +276,16 @@ export function gatherAutonomyCandidates(
       // Extra focus on single lowest need
       if (needHelp(idef, low.key) > 0) {
         score += urgencyWeight(low.value) * 2;
+      }
+
+      // Survival needs get an earlier / harder pull so they never collapse
+      for (const k of SURVIVAL_KEYS) {
+        if (needHelp(idef, k) > 0 && sim.needs[k] < URGENT) {
+          score += urgencyWeight(sim.needs[k]) * 2.5;
+          if (k === 'energy' && sim.needs.energy < CRITICAL) score += 35;
+          if (k === 'hunger' && sim.needs.hunger < CRITICAL) score += 30;
+          if (k === 'bladder' && sim.needs.bladder < CRITICAL) score += 32;
+        }
       }
 
       // Skill practice when comfortable
@@ -480,45 +512,78 @@ export function pickAutonomyAction(
 }
 
 /**
- * Cancel non-player actions that don't help when a need is critical.
+ * Cancel actions that don't help when a survival need is critical.
+ * Player walks and fluff are dropped so Sims/NPCs can eat, sleep, etc.
  */
+function queueItemHelpsSurvival(
+  content: ContentPack,
+  sim: SimEntity,
+  interactionId: string,
+): boolean {
+  if (interactionId.startsWith('__travel__:')) return true;
+  const idef = getDef(content, interactionId);
+  if (!idef) return false;
+  if (idef.social) return false;
+  return SURVIVAL_KEYS.some((k) => sim.needs[k] < CRITICAL && needHelp(idef, k) > 0);
+}
+
 export function systemAutonomyPreempt(world: World, content: ContentPack): void {
   for (const sim of allSims(world)) {
     if (sim.presence !== 'on_lot') continue;
-    if (!hasCritical(sim.needs)) continue;
-    if (sim.action.kind === 'idle') continue;
+    if (!hasSurvivalCritical(sim.needs)) continue;
 
-    // Never preempt player-queued work mid-action if it was player... we only know queue flags
-    // Preempt only pathing/pending autonomy (not performing almost done)
+    // Never interrupt an active conversation (player talk / NPC social)
+    if (sim.socialLock) continue;
+
+    if (sim.action.kind === 'idle') {
+      // Drop autonomy fluff; keep player-queued talk / care
+      if (sim.queue.items.length > 0) {
+        sim.queue.items = sim.queue.items.filter(
+          (q) => q.playerQueued || queueItemHelpsSurvival(content, sim, q.interactionId),
+        );
+      }
+      continue;
+    }
+
     const act = sim.action;
-    if (act.kind === 'performing' && act.ticksLeft <= 3) continue;
+    if (act.kind === 'performing' && act.ticksLeft <= 2) continue;
 
     let interactionId =
       act.kind === 'performing' || act.kind === 'pathing' || act.kind === 'pending'
         ? act.interactionId
         : null;
     if (!interactionId) continue;
-    // Never cancel player-directed walk-to (see WALK_INTERACTION_ID in commands.ts)
-    if (interactionId === '__walk__') continue;
-    const idef = getDef(content, interactionId);
-    if (!idef) continue;
+
+    // Travel home / care travel is allowed to continue
+    if (interactionId.startsWith('__travel__:')) continue;
+
+    const idef = interactionId === '__walk__' ? undefined : getDef(content, interactionId);
+    // Player / anyone mid-talk — do not cancel
+    if (idef?.social) continue;
 
     let helps = false;
-    for (const k of NEED_KEYS) {
-      if (sim.needs[k] < CRITICAL && needHelp(idef, k) > 0) {
-        helps = true;
-        break;
+    if (interactionId === '__walk__') {
+      helps = false; // pure walks never count as survival care
+    } else if (idef) {
+      for (const k of SURVIVAL_KEYS) {
+        if (sim.needs[k] < CRITICAL && needHelp(idef, k) > 0) {
+          helps = true;
+          break;
+        }
       }
-    }
-    // Held chain always helps hunger path
-    if (sim.inventory.held && (interactionId.includes('cook') || interactionId.includes('eat'))) {
-      helps = true;
+      if (
+        sim.inventory.held &&
+        (interactionId.includes('cook') || interactionId.includes('eat'))
+      ) {
+        helps = true;
+      }
     }
     if (helps) continue;
 
-    // Drop autonomy queue junk; keep playerQueued items
-    sim.queue.items = sim.queue.items.filter((q) => q.playerQueued);
-    // Cancel current non-helpful action
+    // Drop autonomy fluff; keep player-queued social / care
+    sim.queue.items = sim.queue.items.filter(
+      (q) => q.playerQueued || queueItemHelpsSurvival(content, sim, q.interactionId),
+    );
     for (const o of allObjects(world)) {
       for (const s of o.slots) {
         if (s.reservedBy === sim.id) {
@@ -531,12 +596,100 @@ export function systemAutonomyPreempt(world: World, content: ContentPack): void 
     sim.path.index = 0;
     sim.action = { kind: 'idle' };
     sim.anim.clip = 'idle';
-    sim.autonomy.nextPlanTick = world.clock.tick; // replan now
+    sim.autonomy.nextPlanTick = world.clock.tick;
     getObs().event('autonomy.preempt', 'ai', {
       simId: sim.id,
       dropped: interactionId,
     });
   }
+}
+
+function clearSocialLocks(world: World, sim: SimEntity): void {
+  const partnerId = sim.socialLock?.partnerId;
+  sim.socialLock = null;
+  if (partnerId != null) {
+    const partner = allSims(world).find((s) => s.id === partnerId);
+    if (partner?.socialLock?.partnerId === sim.id) partner.socialLock = null;
+  }
+}
+
+function applyAutonomyPick(
+  world: World,
+  sim: SimEntity,
+  best: AutonomyCandidate,
+): void {
+  if (best.interactionId.startsWith('__travel__:')) {
+    const dest = best.interactionId.slice('__travel__:'.length);
+    travelSimToPlace(world, sim.id, dest, { silent: isNpc(sim) });
+  } else {
+    sim.queue.items.push({
+      interactionId: best.interactionId,
+      targetId: best.targetId,
+      playerQueued: false,
+    });
+  }
+  getObs().noteAutonomyPick({
+    simId: sim.id,
+    interactionId: best.interactionId,
+    targetId: best.targetId,
+    score: Math.round(best.score * 100) / 100,
+    reason: best.reason,
+  });
+}
+
+/** Queue / travel the best care action immediately (used by autonomy + failsafe). */
+export function forceEmergencySelfCare(
+  world: World,
+  content: ContentPack,
+  sim: SimEntity,
+): boolean {
+  if (sim.presence !== 'on_lot') return false;
+  clearSocialLocks(world, sim);
+  sim.autonomy.nextPlanTick = world.clock.tick;
+  sim.autonomy.cooldownUntil = 0;
+
+  // Already caring or traveling for care
+  if (sim.action.kind === 'performing' || sim.action.kind === 'pathing') {
+    const iid =
+      sim.action.kind === 'performing' || sim.action.kind === 'pathing'
+        ? sim.action.interactionId
+        : null;
+    if (iid && iid !== '__walk__') {
+      if (iid.startsWith('__travel__:')) return true;
+      const idef = getDef(content, iid);
+      if (idef && SURVIVAL_KEYS.some((k) => needHelp(idef, k) > 0)) return true;
+    }
+  }
+
+  if (sim.queue.items.length > 0) {
+    const q = sim.queue.items[0]!;
+    if (q.interactionId.startsWith('__travel__:')) return true;
+    const idef = getDef(content, q.interactionId);
+    if (idef && SURVIVAL_KEYS.some((k) => needHelp(idef, k) > 0)) return true;
+    sim.queue.items = [];
+  }
+
+  if (sim.action.kind !== 'idle' && sim.action.kind !== 'failed' && sim.action.kind !== 'succeeded') {
+    // Preempt already ran; if still busy on fluff, bail — next tick
+    return false;
+  }
+  sim.action = { kind: 'idle' };
+  if (sim.anim.clip === 'pass_out') sim.anim.clip = 'idle';
+
+  const best = pickAutonomyAction(world, content, sim);
+  if (best && best.score > 0) {
+    applyAutonomyPick(world, sim, best);
+    return true;
+  }
+
+  // Last resort: go home where beds/fridge/toilet exist
+  const homeId = personalHomeId(world, content, sim);
+  if (homeId && sim.placeId !== homeId && world.lots[homeId]) {
+    travelSimToPlace(world, sim.id, homeId, { silent: isNpc(sim) });
+    getObs().event('autonomy.emergency_home', 'ai', { simId: sim.id, homeId });
+    return true;
+  }
+  return false;
 }
 
 export function systemAutonomy(world: World, content: ContentPack): void {
@@ -548,12 +701,20 @@ export function systemAutonomy(world: World, content: ContentPack): void {
     if (sim.socialLock) continue;
     if (world.clock.tick < sim.autonomy.nextPlanTick) continue;
     if (sim.action.kind !== 'idle') continue;
-    // Allow planning if queue only has nothing, or only replan empty
+
+    const survivalCritical = hasSurvivalCritical(sim.needs);
     if (sim.queue.items.length > 0) {
-      // If only autonomy items and critical, may already have been preempted
-      continue;
+      if (!survivalCritical) continue;
+      const helps = sim.queue.items.some((q) => {
+        if (q.interactionId.startsWith('__travel__:')) return true;
+        const idef = getDef(content, q.interactionId);
+        return !!idef && SURVIVAL_KEYS.some((k) => sim.needs[k] < CRITICAL && needHelp(idef, k) > 0);
+      });
+      if (helps) continue;
+      sim.queue.items = [];
     }
-    if (world.clock.tick < sim.autonomy.cooldownUntil) continue;
+    // Survival planning ignores soft cooldown
+    if (!survivalCritical && world.clock.tick < sim.autonomy.cooldownUntil) continue;
 
     // Auto-enroll in a career once if unemployed (household only — never NPCs)
     if (sim.role !== 'npc' && !sim.career.trackId && content.careers.length > 0) {
@@ -566,6 +727,7 @@ export function systemAutonomy(world: World, content: ContentPack): void {
           level: 0,
           performance: 50,
           daysWorked: 0,
+          skipCount: 0,
         };
         world.eventBus.push({
           type: 'toast',
@@ -580,31 +742,7 @@ export function systemAutonomy(world: World, content: ContentPack): void {
 
     const best = pickAutonomyAction(world, content, sim);
     if (best && best.score > 0.5) {
-      // Instant city travel (self-sufficient exploration)
-      if (best.interactionId.startsWith('__travel__:')) {
-        const dest = best.interactionId.slice('__travel__:'.length);
-        travelSimToPlace(world, sim.id, dest, { silent: isNpc(sim) });
-        getObs().noteAutonomyPick({
-          simId: sim.id,
-          interactionId: best.interactionId,
-          targetId: null,
-          score: Math.round(best.score * 100) / 100,
-          reason: best.reason,
-        });
-      } else {
-        sim.queue.items.push({
-          interactionId: best.interactionId,
-          targetId: best.targetId,
-          playerQueued: false,
-        });
-        getObs().noteAutonomyPick({
-          simId: sim.id,
-          interactionId: best.interactionId,
-          targetId: best.targetId,
-          score: Math.round(best.score * 100) / 100,
-          reason: best.reason,
-        });
-      }
+      applyAutonomyPick(world, sim, best);
     }
 
     // Standing on exit pad — optional step-on travel for player-driven walks
@@ -618,26 +756,35 @@ export function systemAutonomy(world: World, content: ContentPack): void {
       // Don't auto-step for autonomy every frame; only if they planned travel already handled
     }
 
-    // Replan cadence: urgent = soon, comfortable = less often
+    // Replan cadence: survival-critical = every tick; comfortable = less often
     const low = lowestNeed(sim.needs);
     let delay: number;
-    if (low.value < CRITICAL) delay = 2 + Math.floor(nextRng(world.rng) * 3);
-    else if (low.value < URGENT) delay = 5 + Math.floor(nextRng(world.rng) * 5);
+    if (survivalCritical || low.value < CRITICAL) delay = 1;
+    else if (low.value < URGENT) delay = 4 + Math.floor(nextRng(world.rng) * 4);
     else delay = 10 + Math.floor(nextRng(world.rng) * 12);
     sim.autonomy.nextPlanTick = world.clock.tick + delay;
   }
 }
 
-/** Soft survival: if a need has been bottomed out, nudge so they don't soft-lock forever. */
-export function systemSurvivalSafety(world: World): void {
+/**
+ * Hard survival rail: never pass out — floor collapsed needs and force care.
+ */
+export function systemSurvivalSafety(world: World, content: ContentPack): void {
   for (const sim of allSims(world)) {
     if (sim.presence !== 'on_lot') continue;
-    // If completely empty and idle/failed loop, give a tiny recovery so AI can act
-    for (const k of NEED_KEYS) {
-      if (sim.needs[k] <= 0 && sim.action.kind === 'idle' && sim.queue.items.length === 0) {
-        sim.needs[k] = 8;
-        sim.autonomy.nextPlanTick = world.clock.tick;
-      }
+
+    // Floor so free-fall never soft-locks the AI (no pass-out)
+    for (const k of SURVIVAL_KEYS) {
+      if (sim.needs[k] < 1) sim.needs[k] = 1;
     }
+    if (sim.needs.energy <= ENERGY_COLLAPSE) {
+      sim.needs.energy = Math.max(sim.needs.energy, 10);
+    }
+
+    const low = lowestSurvivalNeed(sim.needs);
+    if (low.value >= CRITICAL && sim.needs.energy > ENERGY_COLLAPSE) continue;
+
+    if (sim.anim.clip === 'pass_out') sim.anim.clip = 'idle';
+    forceEmergencySelfCare(world, content, sim);
   }
 }

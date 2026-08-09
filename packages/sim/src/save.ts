@@ -179,6 +179,9 @@ export function deserializeWorld(bytes: Uint8Array): World {
     if ((sim as { npcDefId?: string | null }).npcDefId === undefined) {
       (sim as { npcDefId: string | null }).npcDefId = null;
     }
+    if (typeof sim.career?.skipCount !== 'number') {
+      sim.career = { ...sim.career, skipCount: 0 };
+    }
     world.entities.set(sim.id, sim);
     world.nextId = Math.max(world.nextId, sim.id + 1);
   }

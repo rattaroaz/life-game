@@ -113,4 +113,19 @@ describe('NPC system', () => {
     expect(edge?.flags).toContain('met');
     expect(edge?.friendship).toBe(8);
   });
+
+  it('talkTo queues Talk with an NPC (and lists them under people)', () => {
+    const content = contentWithNpcs();
+    const world = prepWorld(content);
+    const { simA } = spawnTestPair(world, content);
+    const [npcId] = ensureNpcsSpawned(world, content);
+    const cmds = createCommands(world, content);
+    cmds.selectSim(simA);
+    expect(cmds.talkTo(npcId!, simA)).toBe(true);
+    const sim = getSim(world, simA)!;
+    expect(sim.queue.items.some((q) => q.interactionId === 'interact.chat')).toBe(true);
+    expect(sim.queue.items[0]!.targetId).toBe(npcId);
+    const hud = projectHud(world, content, []);
+    expect(hud.people.some((p) => p.id === npcId && p.role === 'npc')).toBe(true);
+  });
 });

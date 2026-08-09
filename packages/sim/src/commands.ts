@@ -12,7 +12,7 @@ import { ensureNpcsSpawned, FLIRT_MIN_FRIENDSHIP, getNpcDef, isNpc } from './npc
 import { getObs } from './observability/hub.js';
 import { findPath, nearestWalkable } from './pathfinding.js';
 import { getRelationship } from './relationships.js';
-import type { ContentPack, EntityId, HudProjection, World } from './types.js';
+import type { ContentPack, EntityId, HudProjection, SimEntity, World } from './types.js';
 import {
   allObjects,
   allSims,
@@ -28,6 +28,24 @@ import { clearSocialPair } from './systems.js';
 /** Special interaction id: pure walk-to tile (no object use). */
 export const WALK_INTERACTION_ID = '__walk__';
 
+/** Player work skips before the Sim is fired. */
+export const WORK_SKIP_FIRE_COUNT = 3;
+const WORK_SKIP_PERF_PENALTY = 28;
+
+export type BusyInfo = {
+  busy: boolean;
+  /** Player-facing activity, e.g. "Working" / "Watching TV" */
+  activityLabel: string;
+  atWork: boolean;
+  name: string;
+};
+
+export type InterruptResult = {
+  interrupted: boolean;
+  leftWork: boolean;
+  fired: boolean;
+};
+
 export type SimCommands = {
   setMode: (mode: GameMode) => void;
   setSpeed: (speed: 0 | 1 | 2 | 3) => void;
@@ -36,6 +54,13 @@ export type SimCommands = {
   setWorldTarget: (id: EntityId | null) => void;
   enqueueInteraction: (simId: EntityId, interactionId: string, targetId: EntityId | null) => void;
   cancelAction: (simId: EntityId) => void;
+  /** Whether the Sim is mid-action / at work and needs a stop confirm. */
+  getBusyInfo: (simId?: EntityId | null) => BusyInfo;
+  /**
+   * Drop current action + queue; if at work, leave the shift (job risk).
+   * Call before forcing a new player command after the player confirms.
+   */
+  interruptForPlayer: (simId: EntityId) => InterruptResult;
   /**
    * Player-directed walk: selected Sim paths to (x,y) on their current place.
    * Clears current queue/action. Returns false if no path / no sim.
@@ -55,6 +80,11 @@ export type SimCommands = {
   viewPlace: (placeId: string) => boolean;
   /** Send selected (or given) Sim to a place */
   travelTo: (placeId: string, simId?: EntityId | null) => boolean;
+  /**
+   * Selected household Sim talks to another Sim/NPC.
+   * Travels to their place if needed, then queues Talk (chat).
+   */
+  talkTo: (targetSimId: EntityId, simId?: EntityId | null) => boolean;
   debugSpawnHousehold: () => void;
   createHousehold: (opts: {
     householdName: string;
@@ -75,7 +105,68 @@ export type SimCommands = {
   drainEvents: () => string[];
 };
 
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+/** True only while actually doing an activity — walking / pathing does not count. */
+function isEngagedInActivity(sim: SimEntity): boolean {
+  return sim.action.kind === 'performing';
+}
+
+function clearSimActionState(world: World, sim: SimEntity): void {
+  clearSocialPair(world, sim);
+  for (const o of allObjects(world)) {
+    for (const s of o.slots) {
+      if (s.reservedBy === sim.id) {
+        s.reservedBy = null;
+        s.reservedUntilTick = 0;
+      }
+    }
+  }
+  sim.queue.items = [];
+  sim.path.waypoints = [];
+  sim.path.index = 0;
+  sim.anim.clip = 'idle';
+  sim.action = { kind: 'idle' };
+}
+
 export function createCommands(world: World, content: ContentPack): SimCommands {
+  const applyWorkSkipPenalty = (sim: SimEntity): boolean => {
+    if (!sim.career.trackId) return false;
+    sim.career.skipCount = (sim.career.skipCount ?? 0) + 1;
+    sim.career.performance = clamp(
+      sim.career.performance - WORK_SKIP_PERF_PENALTY,
+      0,
+      100,
+    );
+    const skips = sim.career.skipCount;
+    const fired = skips >= WORK_SKIP_FIRE_COUNT || sim.career.performance <= 0;
+    if (fired) {
+      const job =
+        content.careers.find((c) => c.id === sim.career.trackId)?.nameKey ?? 'their job';
+      sim.career = {
+        trackId: null,
+        level: 0,
+        performance: 50,
+        daysWorked: sim.career.daysWorked,
+        skipCount: 0,
+      };
+      world.eventBus.push({
+        type: 'toast',
+        message: `${sim.identity.firstName} was fired from ${job} for skipping work too often`,
+      });
+      getObs().event('career.fired', 'career', { simId: sim.id, skips });
+      return true;
+    }
+    const left = WORK_SKIP_FIRE_COUNT - skips;
+    world.eventBus.push({
+      type: 'toast',
+      message: `${sim.identity.firstName} left work early (boss noticed — ${left} warning${left === 1 ? '' : 's'} left)`,
+    });
+    return false;
+  };
+
   return {
     setMode(mode) {
       const prev = world.mode;
@@ -127,6 +218,49 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
         player: true,
       });
     },
+    getBusyInfo(simId) {
+      const id = simId ?? world.ui.selectedSimId;
+      if (id == null) {
+        return { busy: false, activityLabel: 'Idle', atWork: false, name: 'Sim' };
+      }
+      const sim = getSim(world, id);
+      if (!sim) {
+        return { busy: false, activityLabel: 'Idle', atWork: false, name: 'Sim' };
+      }
+      const activity = describeSimActivity(sim, content, world);
+      const atWork = sim.presence === 'at_work';
+      // Walking / en route never needs a stop confirm — only at-activity or at work
+      const busy = atWork || isEngagedInActivity(sim);
+      return {
+        busy,
+        activityLabel: activity.label,
+        atWork,
+        name: sim.identity.firstName,
+      };
+    },
+    interruptForPlayer(simId) {
+      const sim = getSim(world, simId);
+      if (!sim) {
+        return { interrupted: false, leftWork: false, fired: false };
+      }
+      const wasBusy =
+        sim.presence === 'at_work' || isEngagedInActivity(sim) || sim.queue.items.length > 0;
+      const leftWork = sim.presence === 'at_work';
+      let fired = false;
+      if (leftWork) {
+        fired = applyWorkSkipPenalty(sim);
+        sim.presence = 'on_lot';
+        // Stay at the workplace lot so the player can command them immediately
+      }
+      clearSimActionState(world, sim);
+      sim.autonomy.nextPlanTick = world.clock.tick + 4;
+      getObs().event('action.interrupt_player', 'input', {
+        simId,
+        leftWork,
+        fired,
+      });
+      return { interrupted: wasBusy, leftWork, fired };
+    },
     viewPlace(placeId) {
       const ok = setActivePlace(world, placeId);
       if (ok) {
@@ -143,31 +277,86 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
       }
       return ok;
     },
+    talkTo(targetSimId, simId) {
+      const id = simId ?? world.ui.selectedSimId;
+      if (id == null) {
+        world.eventBus.push({ type: 'toast', message: 'Select a household Sim first' });
+        return false;
+      }
+      const sim = getSim(world, id);
+      const other = getSim(world, targetSimId);
+      if (!sim || sim.role === 'npc') {
+        world.eventBus.push({ type: 'toast', message: 'Select a household Sim first' });
+        return false;
+      }
+      if (!other || other.id === sim.id) {
+        world.eventBus.push({ type: 'toast', message: 'Nobody to talk to' });
+        return false;
+      }
+      if (sim.presence === 'at_work') {
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} is at work — confirm to pull them off the job first`,
+        });
+        return false;
+      }
+      if (other.presence !== 'on_lot') {
+        world.eventBus.push({
+          type: 'toast',
+          message: `${other.identity.firstName} is not available right now`,
+        });
+        return false;
+      }
+
+      world.ui.targetEntityId = other.id;
+      // Meet them where they are
+      if (sim.placeId !== other.placeId) {
+        const traveled = travelSimToPlace(world, sim.id, other.placeId);
+        if (!traveled) {
+          world.eventBus.push({
+            type: 'toast',
+            message: `Could not reach ${other.identity.firstName}`,
+          });
+          return false;
+        }
+        setActivePlace(world, other.placeId);
+      }
+
+      clearSimActionState(world, sim);
+      sim.queue.items.push({
+        interactionId: 'interact.chat',
+        targetId: other.id,
+        playerQueued: true,
+      });
+      world.eventBus.push({
+        type: 'toast',
+        message: `${sim.identity.firstName} is going to talk with ${other.identity.firstName}`,
+      });
+      getObs().event('action.talk', 'input', {
+        simId: sim.id,
+        targetId: other.id,
+      });
+      return true;
+    },
     cancelAction(simId) {
       const sim = getSim(world, simId);
       if (!sim) return;
-      sim.queue.items = [];
-      if (sim.action.kind !== 'idle') {
-        const iid =
-          'interactionId' in sim.action ? sim.action.interactionId : 'cancel';
-        clearSocialPair(world, sim);
-        for (const o of allObjects(world)) {
-          for (const s of o.slots) {
-            if (s.reservedBy === sim.id) {
-              s.reservedBy = null;
-              s.reservedUntilTick = 0;
-            }
-          }
-        }
-        sim.action = {
-          kind: 'failed',
-          interactionId: iid,
-          reason: 'cancelled_by_player',
-        };
-        sim.path.waypoints = [];
-        sim.path.index = 0;
-        sim.anim.clip = 'idle';
+      // Soft cancel (no work penalty) — use interruptForPlayer when pulling off a job
+      if (sim.presence === 'at_work') {
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} is at work — confirm to pull them off the job`,
+        });
+        return;
       }
+      if (
+        sim.action.kind === 'idle' &&
+        sim.queue.items.length === 0 &&
+        sim.path.waypoints.length === 0
+      ) {
+        return;
+      }
+      clearSimActionState(world, sim);
     },
     walkTo(x, y, simId) {
       const id = simId ?? world.ui.selectedSimId;
@@ -183,7 +372,7 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
       if (sim.presence === 'at_work') {
         world.eventBus.push({
           type: 'toast',
-          message: `${sim.identity.firstName} is at work and cannot walk on the lot`,
+          message: `${sim.identity.firstName} is at work — confirm to pull them off the job first`,
         });
         return false;
       }
@@ -339,7 +528,7 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
       const sim = getSim(world, simId);
       if (!sim || isNpc(sim)) return;
       if (!content.careers.find((c) => c.id === trackId)) return;
-      sim.career = { trackId, level: 0, performance: 50, daysWorked: 0 };
+      sim.career = { trackId, level: 0, performance: 50, daysWorked: 0, skipCount: 0 };
       world.eventBus.push({
         type: 'toast',
         message: `${sim.identity.firstName} joined a career`,
@@ -526,6 +715,31 @@ export function projectHud(world: World, content: ContentPack, toasts: string[])
         placeName: getPlaceMeta(world, s.placeId)?.name ?? s.placeId,
         needs: { ...s.needs },
       })),
+    people: sims
+      .filter((s) => s.id !== selected?.id && s.presence === 'on_lot')
+      .filter((s) => s.role === 'npc' || s.role === 'household')
+      .map((s) => {
+        const rel = selected
+          ? getRelationship(world.relationships, selected.id, s.id)
+          : null;
+        const npcDef = getNpcDef(content, s.npcDefId);
+        return {
+          id: s.id,
+          name: `${s.identity.firstName} ${s.identity.lastName}`,
+          role: s.role,
+          placeId: s.placeId,
+          placeName: getPlaceMeta(world, s.placeId)?.name ?? s.placeId,
+          here: s.placeId === activeId,
+          bio: npcDef?.bio ?? null,
+          friendship: rel?.friendship ?? 0,
+          met: !!rel?.flags.includes('met'),
+        };
+      })
+      .sort((a, b) => {
+        if (a.here !== b.here) return a.here ? -1 : 1;
+        if (a.role !== b.role) return a.role === 'npc' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      }),
     selectedSim:
       selected && selected.role === 'household'
         ? (() => {

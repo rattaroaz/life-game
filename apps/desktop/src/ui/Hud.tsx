@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { allObjects } from '@lifesim/sim';
 import type { WorldView } from '@lifesim/render';
+import { runPlayerAction } from '../game/playerAction';
 import { useGameStore } from '../game/store';
 import { ActivityWindow } from './ActivityWindow';
 
@@ -33,6 +34,7 @@ export function Hud() {
   const content = useGameStore((s) => s.content);
   const world = useGameStore((s) => s.world);
   const toasts = useGameStore((s) => s.toasts);
+  const dismissToast = useGameStore((s) => s.dismissToast);
   const selectedBuyDef = useGameStore((s) => s.selectedBuyDef);
   const setSelectedBuyDef = useGameStore((s) => s.setSelectedBuyDef);
   const buildKind = useGameStore((s) => s.buildKind);
@@ -161,17 +163,21 @@ export function Hud() {
               className={hud.placeId === p.id ? 'active' : ''}
               title={p.description || `View ${p.name}`}
               onClick={() => {
-                // Show the chosen location (and send selected Sim there if any)
-                commands.viewPlace(p.id);
+                const go = () => {
+                  commands.viewPlace(p.id);
+                  if (hud.selectedSim) {
+                    commands.travelTo(p.id, hud.selectedSim.id);
+                  }
+                  const w = useGameStore.getState().world;
+                  const view = getWorldView();
+                  if (w && view) view.snapToPlace(w, p.id);
+                  reproject();
+                };
                 if (hud.selectedSim) {
-                  commands.travelTo(p.id, hud.selectedSim.id);
+                  void runPlayerAction(hud.selectedSim.id, go);
+                } else {
+                  go();
                 }
-                const w = useGameStore.getState().world;
-                const view = getWorldView();
-                if (w && view) {
-                  view.snapToPlace(w, p.id);
-                }
-                reproject();
               }}
             >
               {p.name}
@@ -214,6 +220,69 @@ export function Hud() {
                 </div>
               </div>
             </button>
+          ))}
+        </div>
+
+        <div className="section-title">
+          People{' '}
+          <span style={{ fontWeight: 400, color: '#64748b', fontSize: 11 }}>
+            (talk)
+          </span>
+        </div>
+        <div className="people-list">
+          {(hud.people ?? []).length === 0 && (
+            <p className="help-hint" style={{ marginTop: 0 }}>
+              No one else around yet — visit the cafe, park, or neighbors.
+            </p>
+          )}
+          {(hud.people ?? []).map((p) => (
+            <div key={p.id} className={`person-row ${p.here ? 'here' : ''}`}>
+              <button
+                type="button"
+                className="person-info"
+                title={p.bio ?? p.name}
+                onClick={() => {
+                  commands.setWorldTarget(p.id);
+                  commands.viewPlace(p.placeId);
+                  const w = useGameStore.getState().world;
+                  const view = getWorldView();
+                  if (w && view) view.snapToEntity(w, p.id);
+                  reproject();
+                }}
+              >
+                <div className="person-name">
+                  {p.name}
+                  {p.role === 'npc' && <span className="person-tag">NPC</span>}
+                </div>
+                <div className="person-meta">
+                  {p.here ? 'Here' : p.placeName}
+                  {p.met ? ` · Friend ${Math.round(p.friendship)}` : ' · strangers'}
+                </div>
+              </button>
+              <button
+                type="button"
+                className="person-talk"
+                disabled={!hud.selectedSim}
+                title={
+                  hud.selectedSim
+                    ? `Talk with ${p.name}`
+                    : 'Select a household Sim first'
+                }
+                onClick={() => {
+                  if (!hud.selectedSim) return;
+                  const simId = hud.selectedSim.id;
+                  void runPlayerAction(simId, () => {
+                    commands.talkTo(p.id, simId);
+                    const w = useGameStore.getState().world;
+                    const view = getWorldView();
+                    if (w && view) view.snapToEntity(w, simId);
+                    reproject();
+                  });
+                }}
+              >
+                Talk
+              </button>
+            </div>
           ))}
         </div>
 
@@ -265,8 +334,11 @@ export function Hud() {
               type="button"
               style={{ marginTop: 6, width: '100%' }}
               onClick={() => {
-                commands.cancelAction(hud.selectedSim!.id);
-                reproject();
+                const simId = hud.selectedSim!.id;
+                void runPlayerAction(simId, () => {
+                  commands.cancelAction(simId);
+                  reproject();
+                });
               }}
             >
               Cancel action
@@ -358,12 +430,13 @@ export function Hud() {
                       disabled={!it.enabled || !hud.selectedSim}
                       onClick={() => {
                         if (!hud.selectedSim) return;
-                        commands.enqueueInteraction(
-                          hud.selectedSim.id,
-                          it.id,
-                          hud.target!.id,
-                        );
-                        reproject();
+                        const simId = hud.selectedSim.id;
+                        const targetId = hud.target!.id;
+                        const interactionId = it.id;
+                        void runPlayerAction(simId, () => {
+                          commands.enqueueInteraction(simId, interactionId, targetId);
+                          reproject();
+                        });
                       }}
                     >
                       {it.labelKey}
@@ -375,6 +448,23 @@ export function Hud() {
                     </button>
                   ))}
                 </div>
+                {hud.target.kind === 'sim' && hud.selectedSim && (
+                  <button
+                    type="button"
+                    className="talk-primary"
+                    style={{ width: '100%', marginTop: 6 }}
+                    onClick={() => {
+                      const simId = hud.selectedSim!.id;
+                      const targetId = hud.target!.id;
+                      void runPlayerAction(simId, () => {
+                        commands.talkTo(targetId, simId);
+                        reproject();
+                      });
+                    }}
+                  >
+                    Talk with {hud.target.label.split(' ')[0]}
+                  </button>
+                )}
                 {hud.target.availableInteractions.length === 0 && (
                   <p className="help-hint">No interactions on this target.</p>
                 )}
@@ -391,8 +481,7 @@ export function Hud() {
               </>
             ) : (
               <p className="help-hint">
-                City map shows that place. Click a household name to focus your Sim again.
-                Click an NPC to talk. Double-click ground to walk.
+                Click an NPC (or use People → Talk) to converse. Double-click ground to walk.
               </p>
             )}
 
@@ -478,10 +567,16 @@ export function Hud() {
       </div>
 
       <div className="toast-stack">
-        {toasts.map((t, i) => (
-          <div className="toast" key={`${t}-${i}`}>
-            {t}
-          </div>
+        {toasts.map((t) => (
+          <button
+            type="button"
+            className="toast"
+            key={t.id}
+            title="Click to dismiss"
+            onClick={() => dismissToast(t.id)}
+          >
+            {t.message}
+          </button>
         ))}
       </div>
     </>
