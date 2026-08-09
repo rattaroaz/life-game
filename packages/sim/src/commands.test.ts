@@ -132,6 +132,8 @@ describe('SimCommands', () => {
     world.ui.targetEntityId = fridge.id;
     const hud = projectHud(world, content, ['hi']);
     expect(hud.selectedSim?.id).toBe(simA);
+    expect(hud.selectedSim?.activityLabel).toBe('Idle');
+    expect(hud.selectedSim?.activityPhase).toBe('idle');
     expect(hud.target?.kind).toBe('object');
     expect(hud.target?.availableInteractions.length).toBeGreaterThan(0);
     expect(hud.toasts).toContain('hi');
@@ -183,5 +185,48 @@ describe('SimCommands', () => {
       Math.abs(sim.transform.x - startX) + Math.abs(sim.transform.y - startY) > 0.5 ||
       sim.action.kind === 'idle';
     expect(moved).toBe(true);
+  });
+
+  it('walkTo toasts a reason when no Sim is selected', () => {
+    const content = minimalContent();
+    const world = makeTestWorld();
+    spawnTestPair(world, content);
+    world.ui.selectedSimId = null;
+    const cmds = createCommands(world, content);
+    expect(cmds.walkTo(12, 18)).toBe(false);
+    expect(cmds.drainEvents()).toContain('Select a Sim first');
+  });
+
+  it('walkTo toasts when Sim is at work', () => {
+    const content = minimalContent();
+    const world = makeTestWorld();
+    const { simA } = spawnTestPair(world, content);
+    const sim = getSim(world, simA)!;
+    sim.presence = 'at_work';
+    const cmds = createCommands(world, content);
+    expect(cmds.walkTo(12, 18, simA)).toBe(false);
+    const msgs = cmds.drainEvents();
+    expect(msgs.some((m) => m.includes('at work'))).toBe(true);
+  });
+
+  it('walkTo toasts when destination is outside the lot', () => {
+    const content = minimalContent();
+    const world = makeTestWorld();
+    const { simA } = spawnTestPair(world, content);
+    const cmds = createCommands(world, content);
+    expect(cmds.walkTo(999, 999, simA)).toBe(false);
+    expect(cmds.drainEvents()).toContain('That spot is outside the lot');
+  });
+
+  it('walkTo unpauses so the Sim actually walks', () => {
+    const content = minimalContent();
+    const world = makeTestWorld(3);
+    const { simA } = spawnTestPair(world, content);
+    world.clock.paused = true;
+    world.clock.speed = 0;
+    const cmds = createCommands(world, content);
+    expect(cmds.walkTo(12, 18, simA)).toBe(true);
+    expect(world.clock.paused).toBe(false);
+    expect(world.clock.speed).toBeGreaterThan(0);
   });
 });

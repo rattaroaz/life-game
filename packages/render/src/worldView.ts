@@ -63,6 +63,8 @@ export class WorldView {
   private lastClickAt = 0;
   private lastClickTile = { x: -999, y: -999 };
   private readonly doubleClickMs = 350;
+  /** Deferred single-click so a double-click can cancel Sim reselection. */
+  private pendingPick: ReturnType<typeof setTimeout> | null = null;
 
   constructor(content: ContentPack, callbacks: WorldViewCallbacks) {
     this.app = new Application();
@@ -137,10 +139,41 @@ export class WorldView {
     this.ready = true;
   }
 
+  /** Jump camera to a city place (entry / center of the lot). */
+  snapToPlace(world: World, placeId?: string | null): void {
+    this.hitWorld = world;
+    const pid = placeId ?? world.neighborhood?.activePlaceId ?? world.lot.id;
+    const lot = world.lots[pid] ?? world.lot;
+    const entry = lot.entryMarkers[0] ?? {
+      x: Math.floor(lot.width / 2),
+      y: Math.floor(lot.height / 2),
+    };
+    this.forceSnap = false;
+    this.centerOnWorld(entry.x, entry.y);
+  }
+
   /** Call when player selects a Sim from the HUD — jump camera to them once. */
   snapToEntity(world: World, entityId: EntityId | null): void {
     this.hitWorld = world;
-    if (entityId != null) world.ui.selectedSimId = entityId;
+    if (entityId != null) {
+      const sim = allSims(world).find((s) => s.id === entityId);
+      // Only household Sims become the controlled selection
+      if (sim && sim.role !== 'npc') {
+        world.ui.selectedSimId = entityId;
+      }
+      if (sim) {
+        // Follow them to their current place, then center hard on them
+        if (sim.placeId && world.lots[sim.placeId]) {
+          world.neighborhood.activePlaceId = sim.placeId;
+          world.lot = world.lots[sim.placeId]!;
+        }
+        if (sim.presence === 'on_lot' && Number.isFinite(sim.transform.x)) {
+          this.forceSnap = false;
+          this.centerOnWorld(sim.transform.x, sim.transform.y);
+          return;
+        }
+      }
+    }
     this.reframeIfOffscreen(world, true);
   }
 
@@ -158,21 +191,28 @@ export class WorldView {
     return { sw: Math.max(1, sw), sh: Math.max(1, sh) };
   }
 
-  /** Focus point for camera: selected Sim, or door while at work. */
+  /** Focus point for camera: selected Sim on this lot, else lot entry. */
   private focusWorldPoint(world: World): { wx: number; wy: number } | null {
+    const activeId = world.neighborhood?.activePlaceId ?? world.lot.id;
     let sim =
       world.ui.selectedSimId != null
         ? allSims(world).find((s) => s.id === world.ui.selectedSimId)
         : null;
-    if (!sim) sim = allSims(world)[0] ?? null;
-    if (!sim) return null;
+    if (!sim) sim = allSims(world).find((s) => s.placeId === activeId) ?? null;
 
-    if (sim.presence !== 'on_lot') {
+    const lotEntry = () => {
       const entry = world.lot.entryMarkers[0] ?? { x: 14, y: 21 };
       return { wx: entry.x, wy: entry.y };
+    };
+
+    if (!sim) return lotEntry();
+
+    // Viewing a different place than the Sim — show that place, don't chase off-lot coords
+    if (sim.placeId !== activeId || sim.presence !== 'on_lot') {
+      return lotEntry();
     }
     if (!Number.isFinite(sim.transform.x) || !Number.isFinite(sim.transform.y)) {
-      return null;
+      return lotEntry();
     }
     return { wx: sim.transform.x, wy: sim.transform.y };
   }
@@ -253,14 +293,40 @@ export class WorldView {
       this.lastClickTile = { x: gx, y: gy };
 
       if (isDouble && this.callbacks.onDoubleClick) {
+        this.clearPendingPick();
         this.callbacks.onDoubleClick(hit, gx, gy);
         return;
       }
+
+      // Defer Sim picks: the first click of a double-click must not steal selection
+      // from the Sim that should walk to the target.
+      const hitEnt = hit != null && this.hitWorld ? this.hitWorld.entities.get(hit) : null;
+      if (hitEnt?.kind === 'sim') {
+        this.clearPendingPick();
+        const pickHit = hit;
+        const pickX = gx;
+        const pickY = gy;
+        this.pendingPick = setTimeout(() => {
+          this.pendingPick = null;
+          if (this.destroyed || !this.ready) return;
+          this.callbacks.onPick(pickHit, pickX, pickY);
+        }, this.doubleClickMs);
+        return;
+      }
+
+      this.clearPendingPick();
       this.callbacks.onPick(hit, gx, gy);
     } catch (err) {
       console.warn('pick error', err);
     }
   };
+
+  private clearPendingPick(): void {
+    if (this.pendingPick != null) {
+      clearTimeout(this.pendingPick);
+      this.pendingPick = null;
+    }
+  }
 
   private onPointerUp = () => {
     this.dragging = false;
@@ -667,6 +733,7 @@ export class WorldView {
     this.destroyed = true;
     this.ready = false;
     this.hitWorld = null;
+    this.clearPendingPick();
     try {
       const canvas = this.app.canvas;
       if (this.wheelHandler) {

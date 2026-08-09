@@ -170,6 +170,15 @@ export function deserializeWorld(bytes: Uint8Array): World {
 
   for (const sim of data.entities.sims) {
     if (!sim.placeId) sim.placeId = neighborhood.homePlaceId;
+    // Legacy saves predating NPC roles
+    if ((sim as { role?: string }).role !== 'household' && (sim as { role?: string }).role !== 'npc') {
+      (sim as { role: string }).role = data.household.memberIds.includes(sim.id)
+        ? 'household'
+        : 'npc';
+    }
+    if ((sim as { npcDefId?: string | null }).npcDefId === undefined) {
+      (sim as { npcDefId: string | null }).npcDefId = null;
+    }
     world.entities.set(sim.id, sim);
     world.nextId = Math.max(world.nextId, sim.id + 1);
   }

@@ -238,7 +238,7 @@ export function minimalContent(): ContentPack {
     },
   ];
 
-  return { objects, interactions, careers, traits, aspirations };
+  return { objects, interactions, careers, traits, aspirations, npcs: [] };
 }
 
 export function makeTestWorld(seed = 42): World {

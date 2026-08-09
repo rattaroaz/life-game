@@ -2,11 +2,13 @@ import { create } from 'zustand';
 import {
   createCommands,
   createEmptyWorld,
+  ensureNpcsSpawned,
   furnishNeighborhood,
   getObs,
   initObs,
   listLocalSaves,
   loadFromLocalStorage,
+  normalizeSimRoles,
   projectHud,
   runSimTick,
   saveToLocalStorage,
@@ -78,6 +80,7 @@ export const useGameStore = create<GameStore>((set, get) => {
       careers: [],
       traits: [],
       aspirations: [],
+      npcs: [],
     };
   }
 
@@ -208,6 +211,8 @@ export const useGameStore = create<GameStore>((set, get) => {
         projectAccum = 0;
         // Fill any city places added since the save was written
         furnishNeighborhood(world, content);
+        normalizeSimRoles(world);
+        ensureNpcsSpawned(world, content);
         const commands = createCommands(world, content);
         set((s) => ({
           screen: 'game',
@@ -272,11 +277,12 @@ export const useGameStore = create<GameStore>((set, get) => {
           if (tickAccum > 30) tickAccum = 0;
           simTickMs = performance.now() - simT0;
           simTicksThisFrame = n;
+        }
 
-          const drained = get().commands!.drainEvents();
-          if (drained.length) {
-            for (const m of drained) get().pushToast(m);
-          }
+        // Always surface bus toasts (walk failures must show even while paused)
+        const drained = get().commands!.drainEvents();
+        if (drained.length) {
+          for (const m of drained) get().pushToast(m);
         }
       } catch (e) {
         getObs().logger.error('sim', 'frame sim section failed', {

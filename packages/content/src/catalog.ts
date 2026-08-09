@@ -6,6 +6,7 @@ import type {
   ObjectDef,
   TraitDef,
 } from '@lifesim/sim';
+import { NPCS } from './npcs.js';
 
 const objects: ObjectDef[] = [
   {
@@ -633,7 +634,7 @@ const aspirations: AspirationDef[] = [
 ];
 
 export function loadBuiltinContent(): ContentPack {
-  return { objects, interactions, careers, traits, aspirations };
+  return { objects, interactions, careers, traits, aspirations, npcs: NPCS };
 }
 
 export const BODY_PRESETS = ['body_a', 'body_b'];

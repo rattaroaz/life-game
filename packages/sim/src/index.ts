@@ -21,5 +21,7 @@ export {
 } from './neighborhood.js';
 export type { PlaceMeta, PlaceKind, PlaceExit } from './neighborhood.js';
 export * from './commands.js';
+export * from './activity.js';
+export * from './npc.js';
 export * from './save.js';
 export * from './observability/index.js';

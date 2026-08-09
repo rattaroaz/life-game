@@ -107,11 +107,17 @@ export type CraftingState = {
   outputHeldItem?: string;
 };
 
+export type SimRole = 'household' | 'npc';
+
 export type SimEntity = {
   kind: 'sim';
   id: EntityId;
   /** Which city place this Sim is currently in */
   placeId: string;
+  /** Household members are player-controlled; NPCs are townies/neighbors */
+  role: SimRole;
+  /** Content id when role is npc (e.g. npc.mei_chen) */
+  npcDefId: string | null;
   transform: { x: number; y: number; zFloor: number; facing: Facing };
   identity: { firstName: string; lastName: string; ageStage: 'adult' };
   visual: SimVisual;
@@ -133,6 +139,24 @@ export type SimEntity = {
     untilTick: number;
     role: 'initiator' | 'partner';
   };
+};
+
+/** Static town character definition (content pack). */
+export type NpcDef = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  /** Short player-facing blurb */
+  bio: string;
+  traits: string[];
+  aspirationId: string;
+  visual: SimVisual;
+  /** Home / sleep place */
+  homePlaceId: string;
+  /** Where they appear when the game starts */
+  startPlaceId: string;
+  /** Offset from that place's entry marker */
+  spawnOffset?: { x: number; y: number };
 };
 
 export type ObjectEntity = {
@@ -220,6 +244,7 @@ export type ContentPack = {
   careers: CareerDef[];
   traits: TraitDef[];
   aspirations: AspirationDef[];
+  npcs: NpcDef[];
 };
 
 export type ObjectSlotDef = {
@@ -348,11 +373,26 @@ export type HudProjection = {
     aspiration: AspirationState;
     traits: string[];
     placeId: string;
+    presence: 'on_lot' | 'at_work';
+    /** Player-facing "what are they doing" status */
+    activityLabel: string;
+    activityDetail: string | null;
+    activityPhase: 'idle' | 'moving' | 'doing' | 'work' | 'failed';
   };
   target: null | {
     id: EntityId;
     kind: 'sim' | 'object';
     label: string;
+    /** Present when targeting a Sim / NPC */
+    role?: SimRole;
+    bio?: string | null;
+    traits?: string[];
+    aspirationLabel?: string | null;
+    relationship?: {
+      friendship: number;
+      romance: number;
+      met: boolean;
+    } | null;
     availableInteractions: {
       id: string;
       labelKey: string;

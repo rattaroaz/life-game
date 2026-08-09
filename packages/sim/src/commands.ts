@@ -1,14 +1,17 @@
 import type { GameMode, Rot } from '@lifesim/shared';
 import { formatClock } from './clock.js';
-import { setWall } from './lot.js';
+import { describeSimActivity } from './activity.js';
+import { cellIndex, inBounds, setWall } from './lot.js';
 import {
   getPlaceMeta,
   refreshPlaceCaches,
   setActivePlace,
   travelSimToPlace,
 } from './neighborhood.js';
+import { ensureNpcsSpawned, FLIRT_MIN_FRIENDSHIP, getNpcDef, isNpc } from './npc.js';
 import { getObs } from './observability/hub.js';
 import { findPath, nearestWalkable } from './pathfinding.js';
+import { getRelationship } from './relationships.js';
 import type { ContentPack, EntityId, HudProjection, World } from './types.js';
 import {
   allObjects,
@@ -96,12 +99,14 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
       else if (world.clock.speed === 0) world.clock.speed = 1;
     },
     selectSim(id) {
-      world.ui.selectedSimId = id;
-      // Follow view to the Sim's current place
       if (id != null) {
         const sim = getSim(world, id);
-        if (sim) setActivePlace(world, sim.placeId);
+        if (!sim || isNpc(sim)) return;
+        world.ui.selectedSimId = id;
+        setActivePlace(world, sim.placeId);
+        return;
       }
+      world.ui.selectedSimId = null;
     },
     setWorldTarget(id) {
       world.ui.targetEntityId = id;
@@ -171,28 +176,71 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
         return false;
       }
       const sim = getSim(world, id);
-      if (!sim || sim.presence !== 'on_lot') {
-        world.eventBus.push({ type: 'toast', message: 'That Sim cannot walk right now' });
+      if (!sim) {
+        world.eventBus.push({ type: 'toast', message: 'Select a Sim first' });
+        return false;
+      }
+      if (sim.presence === 'at_work') {
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} is at work and cannot walk on the lot`,
+        });
+        return false;
+      }
+      if (sim.presence !== 'on_lot') {
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} cannot walk right now`,
+        });
         return false;
       }
       if (sim.placeId !== world.neighborhood.activePlaceId) {
-        setActivePlace(world, sim.placeId);
+        const here = getPlaceMeta(world, world.neighborhood.activePlaceId)?.name ?? 'this place';
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} is not at ${here} — travel there first`,
+        });
+        return false;
       }
       const lot = world.lots[sim.placeId] ?? world.lot;
       const gx = Math.round(x);
       const gy = Math.round(y);
-      const goal = nearestWalkable(lot, gx, gy, 3);
+      if (!inBounds(lot, gx, gy)) {
+        world.eventBus.push({ type: 'toast', message: 'That spot is outside the lot' });
+        return false;
+      }
+      const goal = nearestWalkable(lot, gx, gy, 4);
       if (!goal) {
-        world.eventBus.push({ type: 'toast', message: 'Cannot walk there' });
+        world.eventBus.push({
+          type: 'toast',
+          message: 'That tile is blocked — no nearby walkable spot',
+        });
         return false;
       }
       const start = {
         x: Math.round(sim.transform.x),
         y: Math.round(sim.transform.y),
       };
-      const path = findPath(lot, start, goal);
+      let pathStart = start;
+      if (!inBounds(lot, start.x, start.y) || !lot.walkable[cellIndex(lot, start.x, start.y)]) {
+        const nearStart = nearestWalkable(lot, start.x, start.y, 4);
+        if (!nearStart) {
+          world.eventBus.push({
+            type: 'toast',
+            message: `${sim.identity.firstName} is stuck and cannot path`,
+          });
+          return false;
+        }
+        pathStart = nearStart;
+        sim.transform.x = nearStart.x;
+        sim.transform.y = nearStart.y;
+      }
+      const path = findPath(lot, pathStart, goal);
       if (!path || path.length === 0) {
-        world.eventBus.push({ type: 'toast', message: 'No path to that spot' });
+        world.eventBus.push({
+          type: 'toast',
+          message: 'No path — walls or objects block the way',
+        });
         getObs().notePathResult(false, { simId: id, x: gx, y: gy });
         return false;
       }
@@ -215,8 +263,14 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
         targetId: null,
         fails: 0,
       };
-      sim.anim.clip = 'walk';
-      sim.autonomy.nextPlanTick = world.clock.tick + path.length + 5;
+      sim.anim.clip = path.length > 1 ? 'walk' : 'idle';
+      // Player walk must run — unpause so pathing ticks
+      if (world.clock.paused || world.clock.speed === 0) {
+        world.clock.paused = false;
+        if (world.clock.speed === 0) world.clock.speed = 1;
+      }
+      // Hold autonomy off until arrival (+ buffer)
+      sim.autonomy.nextPlanTick = world.clock.tick + Math.max(path.length, 1) + 8;
       getObs().notePathResult(true, {
         simId: id,
         interactionId: WALK_INTERACTION_ID,
@@ -283,7 +337,7 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
     },
     joinCareer(simId, trackId) {
       const sim = getSim(world, simId);
-      if (!sim) return;
+      if (!sim || isNpc(sim)) return;
       if (!content.careers.find((c) => c.id === trackId)) return;
       sim.career = { trackId, level: 0, performance: 50, daysWorked: 0 };
       world.eventBus.push({
@@ -293,6 +347,7 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
     },
     debugSpawnHousehold() {
       debugSpawnHousehold(world, content);
+      ensureNpcsSpawned(world, content);
     },
     createHousehold(opts) {
       for (const id of [...world.household.memberIds]) {
@@ -304,6 +359,7 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
       // Ensure city is furnished
       if (allObjects(world).length === 0) {
         debugSpawnHousehold(world, content);
+        ensureNpcsSpawned(world, content);
         for (const id of [...world.household.memberIds]) {
           world.entities.delete(id);
         }
@@ -325,6 +381,7 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
         });
         i++;
       }
+      ensureNpcsSpawned(world, content);
       setActivePlace(world, world.neighborhood.homePlaceId);
     },
     drainEvents() {
@@ -339,6 +396,13 @@ export function createCommands(world: World, content: ContentPack): SimCommands 
 
 export function projectHud(world: World, content: ContentPack, toasts: string[]): HudProjection {
   const sims = allSims(world);
+  // Never treat an NPC as the controlled Sim
+  if (world.ui.selectedSimId != null) {
+    const cur = getSim(world, world.ui.selectedSimId);
+    if (!cur || isNpc(cur)) {
+      world.ui.selectedSimId = world.household.memberIds[0] ?? null;
+    }
+  }
   const selected = world.ui.selectedSimId
     ? getSim(world, world.ui.selectedSimId)
     : null;
@@ -386,17 +450,49 @@ export function projectHud(world: World, content: ContentPack, toasts: string[])
         availableInteractions: available,
       };
     } else if (ent?.kind === 'sim' && ent.placeId === activeId) {
+      const npcDef = getNpcDef(content, ent.npcDefId);
+      const rel =
+        selected && selected.id !== ent.id
+          ? getRelationship(world.relationships, selected.id, ent.id)
+          : null;
       const social = content.interactions
         .filter((i) => i.social)
-        .map((i) => ({
-          id: i.id,
-          labelKey: i.nameKey,
-          enabled: ent.id !== selected?.id,
-        }));
+        .map((i) => {
+          let enabled = ent.id !== selected?.id;
+          let failReasonKey: string | undefined;
+          if (enabled && i.id.includes('flirt')) {
+            if ((rel?.friendship ?? 0) < FLIRT_MIN_FRIENDSHIP) {
+              enabled = false;
+              failReasonKey = 'need_friendship';
+            }
+          }
+          return {
+            id: i.id,
+            labelKey: i.nameKey,
+            enabled,
+            failReasonKey,
+          };
+        });
+      const aspirationLabel =
+        content.aspirations.find((a) => a.id === ent.aspiration.defId)?.nameKey ?? null;
+      const traitLabels = ent.traits.ids.map(
+        (tid) => content.traits.find((t) => t.id === tid)?.nameKey ?? tid,
+      );
       target = {
         id: ent.id,
         kind: 'sim',
         label: `${ent.identity.firstName} ${ent.identity.lastName}`,
+        role: ent.role,
+        bio: npcDef?.bio ?? null,
+        traits: traitLabels,
+        aspirationLabel,
+        relationship: selected
+          ? {
+              friendship: rel?.friendship ?? 0,
+              romance: rel?.romance ?? 0,
+              met: !!rel?.flags.includes('met'),
+            }
+          : null,
         availableInteractions: social,
       };
     }
@@ -419,30 +515,40 @@ export function projectHud(world: World, content: ContentPack, toasts: string[])
       kind: p.kind,
       description: p.description,
     })),
-    householdSims: sims.map((s) => ({
-      id: s.id,
-      name: `${s.identity.firstName} ${s.identity.lastName}`,
-      mood: s.mood.value,
-      presence: s.presence,
-      placeId: s.placeId,
-      placeName: getPlaceMeta(world, s.placeId)?.name ?? s.placeId,
-      needs: { ...s.needs },
-    })),
-    selectedSim: selected
-      ? {
-          id: selected.id,
-          name: `${selected.identity.firstName} ${selected.identity.lastName}`,
-          needs: { ...selected.needs },
-          mood: selected.mood.value,
-          skills: { ...selected.skills },
-          career: { ...selected.career },
-          queue: [...selected.queue.items],
-          action: selected.action,
-          aspiration: { ...selected.aspiration },
-          traits: [...selected.traits.ids],
-          placeId: selected.placeId,
-        }
-      : null,
+    householdSims: sims
+      .filter((s) => s.role === 'household' && world.household.memberIds.includes(s.id))
+      .map((s) => ({
+        id: s.id,
+        name: `${s.identity.firstName} ${s.identity.lastName}`,
+        mood: s.mood.value,
+        presence: s.presence,
+        placeId: s.placeId,
+        placeName: getPlaceMeta(world, s.placeId)?.name ?? s.placeId,
+        needs: { ...s.needs },
+      })),
+    selectedSim:
+      selected && selected.role === 'household'
+        ? (() => {
+            const activity = describeSimActivity(selected, content, world);
+            return {
+              id: selected.id,
+              name: `${selected.identity.firstName} ${selected.identity.lastName}`,
+              needs: { ...selected.needs },
+              mood: selected.mood.value,
+              skills: { ...selected.skills },
+              career: { ...selected.career },
+              queue: [...selected.queue.items],
+              action: selected.action,
+              aspiration: { ...selected.aspiration },
+              traits: [...selected.traits.ids],
+              placeId: selected.placeId,
+              presence: selected.presence,
+              activityLabel: activity.label,
+              activityDetail: activity.detail,
+              activityPhase: activity.phase,
+            };
+          })()
+        : null,
     target,
     toasts,
   };

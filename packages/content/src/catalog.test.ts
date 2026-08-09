@@ -62,4 +62,21 @@ describe('builtin catalog integrity', () => {
       expect(a.milestones.length).toBeGreaterThan(0);
     }
   });
+
+  it('ships 10 unique NPCs with traits and places', () => {
+    expect(content.npcs).toHaveLength(10);
+    const ids = content.npcs.map((n) => n.id);
+    expect(new Set(ids).size).toBe(10);
+    const traitIds = new Set(content.traits.map((t) => t.id));
+    const aspIds = new Set(content.aspirations.map((a) => a.id));
+    for (const n of content.npcs) {
+      expect(n.id.startsWith('npc.')).toBe(true);
+      expect(n.firstName.length).toBeGreaterThan(0);
+      expect(n.bio.length).toBeGreaterThan(0);
+      expect(n.startPlaceId.length).toBeGreaterThan(0);
+      expect(n.homePlaceId.length).toBeGreaterThan(0);
+      expect(aspIds.has(n.aspirationId)).toBe(true);
+      for (const t of n.traits) expect(traitIds.has(t)).toBe(true);
+    }
+  });
 });

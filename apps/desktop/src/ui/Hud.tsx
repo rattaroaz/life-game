@@ -1,5 +1,22 @@
+import { useState } from 'react';
 import { allObjects } from '@lifesim/sim';
+import type { WorldView } from '@lifesim/render';
 import { useGameStore } from '../game/store';
+import { ActivityWindow } from './ActivityWindow';
+
+function getWorldView(): WorldView | undefined {
+  return (window as unknown as { __lifesimView?: WorldView }).__lifesimView;
+}
+
+const OBJECTS_COLLAPSED_KEY = 'lifesim.objectsOnLotCollapsed';
+
+function loadObjectsCollapsed(): boolean {
+  try {
+    return localStorage.getItem(OBJECTS_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
 const NEED_COLORS: Record<string, string> = {
   hunger: '#f97316',
@@ -21,6 +38,7 @@ export function Hud() {
   const buildKind = useGameStore((s) => s.buildKind);
   const setBuildKind = useGameStore((s) => s.setBuildKind);
   const reproject = useGameStore((s) => s.reproject);
+  const [objectsCollapsed, setObjectsCollapsed] = useState(loadObjectsCollapsed);
 
   if (!hud || !commands) return null;
 
@@ -53,6 +71,16 @@ export function Hud() {
     </div>
   );
 
+  const queueLabels = (hud.selectedSim?.queue ?? []).map((q) => {
+    if (q.interactionId === '__walk__') return 'Walk';
+    if (q.interactionId.startsWith('__travel__:')) return 'Travel';
+    return (
+      content.interactions.find((i) => i.id === q.interactionId)?.nameKey ??
+      q.interactionId.split('.').pop()?.replace(/_/g, ' ') ??
+      q.interactionId
+    );
+  });
+
   return (
     <>
       <div className="mode-bar">
@@ -71,6 +99,25 @@ export function Hud() {
           </button>
         ))}
       </div>
+
+      {hud.selectedSim && (
+        <ActivityWindow
+          name={hud.selectedSim.name}
+          label={hud.selectedSim.activityLabel}
+          detail={hud.selectedSim.activityDetail}
+          phase={hud.selectedSim.activityPhase}
+          onNameClick={() => {
+            const sim = hud.selectedSim;
+            if (!sim) return;
+            commands.selectSim(sim.id);
+            if (sim.placeId) commands.viewPlace(sim.placeId);
+            const w = useGameStore.getState().world;
+            const view = getWorldView();
+            if (w && view) view.snapToEntity(w, sim.id);
+            reproject();
+          }}
+        />
+      )}
 
       <div className="hud-left">
         <div className="section-title" style={{ marginTop: 0 }}>
@@ -112,24 +159,17 @@ export function Hud() {
               key={p.id}
               type="button"
               className={hud.placeId === p.id ? 'active' : ''}
-              title={p.description}
+              title={p.description || `View ${p.name}`}
               onClick={() => {
-                // View place + send selected Sim there
+                // Show the chosen location (and send selected Sim there if any)
                 commands.viewPlace(p.id);
                 if (hud.selectedSim) {
                   commands.travelTo(p.id, hud.selectedSim.id);
                 }
                 const w = useGameStore.getState().world;
-                const view = (
-                  window as unknown as {
-                    __lifesimView?: {
-                      snapToEntity: (w: unknown, id: number | null) => void;
-                      forceSnap?: boolean;
-                    };
-                  }
-                ).__lifesimView;
+                const view = getWorldView();
                 if (w && view) {
-                  view.snapToEntity(w, w.ui.selectedSimId);
+                  view.snapToPlace(w, p.id);
                 }
                 reproject();
               }}
@@ -147,16 +187,13 @@ export function Hud() {
               key={s.id}
               type="button"
               className={`sim-chip ${hud.selectedSim?.id === s.id ? 'selected' : ''}`}
+              title={`Focus on ${s.name}`}
               onClick={() => {
+                // Click name/chip → select Sim and jump camera back to them
                 commands.selectSim(s.id);
-                // View their place + snap camera
                 if (s.placeId) commands.viewPlace(s.placeId);
                 const w = useGameStore.getState().world;
-                const view = (
-                  window as unknown as {
-                    __lifesimView?: { snapToEntity: (w: unknown, id: number) => void };
-                  }
-                ).__lifesimView;
+                const view = getWorldView();
                 if (w && view) view.snapToEntity(w, s.id);
                 reproject();
               }}
@@ -169,11 +206,11 @@ export function Hud() {
                 }}
               />
               <div style={{ flex: 1 }}>
-                <div>{s.name}</div>
+                <div className="sim-chip-name">{s.name}</div>
                 <div style={{ fontSize: 11, color: '#94a3b8' }}>
                   {s.presence === 'at_work'
                     ? 'At work'
-                    : `${(s as { placeName?: string }).placeName ?? ''} · Mood ${Math.round(s.mood)}`}
+                    : `${s.placeName ?? ''} · Mood ${Math.round(s.mood)}`}
                 </div>
               </div>
             </button>
@@ -220,11 +257,9 @@ export function Hud() {
               </div>
             )}
 
-            <div className="section-title">Queue / Action</div>
+            <div className="section-title">Queue</div>
             <div style={{ fontSize: 12, color: '#94a3b8' }}>
-              {hud.selectedSim.action.kind}
-              {hud.selectedSim.queue.length > 0 &&
-                ` · queued: ${hud.selectedSim.queue.map((q) => q.interactionId.split('.').pop()).join(', ')}`}
+              {queueLabels.length > 0 ? queueLabels.join(' → ') : 'Nothing queued'}
             </div>
             <button
               type="button"
@@ -286,8 +321,35 @@ export function Hud() {
             {hud.target ? (
               <>
                 <div className="section-title">
-                  {hud.target.kind === 'object' ? 'Object' : 'Sim'} — {hud.target.label}
+                  {hud.target.kind === 'object'
+                    ? 'Object'
+                    : hud.target.role === 'npc'
+                      ? 'NPC'
+                      : 'Sim'}{' '}
+                  — {hud.target.label}
                 </div>
+                {hud.target.kind === 'sim' && (
+                  <div className="npc-card">
+                    {hud.target.bio && <p className="npc-bio">{hud.target.bio}</p>}
+                    {hud.target.traits && hud.target.traits.length > 0 && (
+                      <div className="npc-meta">
+                        Traits: {hud.target.traits.join(', ')}
+                      </div>
+                    )}
+                    {hud.target.aspirationLabel && (
+                      <div className="npc-meta">Wants: {hud.target.aspirationLabel}</div>
+                    )}
+                    {hud.target.relationship && (
+                      <div className="npc-rel">
+                        <div>
+                          Friendship {Math.round(hud.target.relationship.friendship)}
+                          {!hud.target.relationship.met && ' · strangers'}
+                        </div>
+                        <div>Romance {Math.round(hud.target.relationship.romance)}</div>
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="interaction-list">
                   {hud.target.availableInteractions.map((it) => (
                     <button
@@ -305,7 +367,11 @@ export function Hud() {
                       }}
                     >
                       {it.labelKey}
-                      {it.failReasonKey ? ` (${it.failReasonKey})` : ''}
+                      {it.failReasonKey === 'need_friendship'
+                        ? ' (need friendship 20)'
+                        : it.failReasonKey
+                          ? ` (${it.failReasonKey})`
+                          : ''}
                     </button>
                   ))}
                 </div>
@@ -325,31 +391,58 @@ export function Hud() {
               </>
             ) : (
               <p className="help-hint">
-                Single-click: select. Double-click ground/object: walk there.
-                Pick objects below for actions.
+                City map shows that place. Click a household name to focus your Sim again.
+                Click an NPC to talk. Double-click ground to walk.
               </p>
             )}
 
-            <div className="section-title">Objects on lot</div>
-            <div className="interaction-list" style={{ maxHeight: 220, overflow: 'auto' }}>
-              {interactables.map((o) => (
-                <button
-                  key={o.id}
-                  type="button"
-                  className={hud.target?.id === o.id ? 'active' : ''}
-                  onClick={() => {
-                    commands.setWorldTarget(o.id);
-                    reproject();
-                  }}
-                >
-                  {o.name}
-                  <span style={{ color: '#94a3b8', marginLeft: 6 }}>({o.count})</span>
-                </button>
-              ))}
-              {interactables.length === 0 && (
-                <p className="help-hint">No interactable objects placed.</p>
-              )}
-            </div>
+            <button
+              type="button"
+              className="section-toggle"
+              aria-expanded={!objectsCollapsed}
+              onClick={() => {
+                setObjectsCollapsed((c) => {
+                  const next = !c;
+                  try {
+                    localStorage.setItem(OBJECTS_COLLAPSED_KEY, next ? '1' : '0');
+                  } catch {
+                    /* ignore */
+                  }
+                  return next;
+                });
+              }}
+            >
+              <span className="section-title" style={{ margin: 0 }}>
+                Objects on lot
+                <span style={{ fontWeight: 400, color: '#64748b', marginLeft: 6 }}>
+                  ({interactables.length})
+                </span>
+              </span>
+              <span className="section-toggle-chevron" aria-hidden>
+                {objectsCollapsed ? '▸' : '▾'}
+              </span>
+            </button>
+            {!objectsCollapsed && (
+              <div className="interaction-list" style={{ maxHeight: 220, overflow: 'auto' }}>
+                {interactables.map((o) => (
+                  <button
+                    key={o.id}
+                    type="button"
+                    className={hud.target?.id === o.id ? 'active' : ''}
+                    onClick={() => {
+                      commands.setWorldTarget(o.id);
+                      reproject();
+                    }}
+                  >
+                    {o.name}
+                    <span style={{ color: '#94a3b8', marginLeft: 6 }}>({o.count})</span>
+                  </button>
+                ))}
+                {interactables.length === 0 && (
+                  <p className="help-hint">No interactable objects placed.</p>
+                )}
+              </div>
+            )}
           </>
         )}
       </div>

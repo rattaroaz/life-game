@@ -35,6 +35,7 @@ export function addRelationshipDelta(
   romance = 0,
 ): void {
   const e = ensureRelationship(edges, a, b);
+  if (!e.flags.includes('met')) e.flags.push('met');
   e.friendship = clamp(e.friendship + friendship, -100, 100);
   e.romance = clamp(e.romance + romance, 0, 100);
 }

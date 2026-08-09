@@ -130,14 +130,22 @@ export function spawnSim(
     visual?: Partial<SimVisual>;
     traits?: string[];
     aspirationId?: string;
+    role?: 'household' | 'npc';
+    npcDefId?: string | null;
+    /** When false, Sim is not added to the player household (NPCs). Default true. */
+    householdMember?: boolean;
   },
 ): SimEntity {
   const id = allocId(world);
   const placeId = opts.placeId ?? world.neighborhood.homePlaceId;
+  const householdMember = opts.householdMember !== false;
+  const role = opts.role ?? (householdMember ? 'household' : 'npc');
   const sim: SimEntity = {
     kind: 'sim',
     id,
     placeId,
+    role,
+    npcDefId: opts.npcDefId ?? null,
     transform: { x: opts.x, y: opts.y, zFloor: 0, facing: 0 },
     identity: {
       firstName: opts.firstName,
@@ -176,8 +184,10 @@ export function spawnSim(
     socialLock: null,
   };
   world.entities.set(id, sim);
-  world.household.memberIds.push(id);
-  if (!world.ui.selectedSimId) world.ui.selectedSimId = id;
+  if (householdMember && role === 'household') {
+    world.household.memberIds.push(id);
+    if (!world.ui.selectedSimId) world.ui.selectedSimId = id;
+  }
   return sim;
 }
 

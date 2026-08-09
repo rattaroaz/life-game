@@ -3,7 +3,9 @@
  * When the player is idle, Sims continuously pick high-value actions to
  * keep needs up, practice skills for career, socialize, and finish held-item chains.
  */
+import { FLIRT_MIN_FRIENDSHIP, getNpcDef, isNpc } from './npc.js';
 import { getObs } from './observability/hub.js';
+import { getRelationship } from './relationships.js';
 import { nextRng } from './rng.js';
 import type {
   ContentPack,
@@ -17,6 +19,7 @@ import type {
 import {
   exitAt,
   getPlaceMeta,
+  objectsInPlace,
   travelSimToPlace,
 } from './neighborhood.js';
 import { allObjects, allSims } from './world.js';
@@ -115,6 +118,34 @@ function lowestNeed(needs: Needs): { key: NeedKey; value: number } {
 
 function hasCritical(needs: Needs): boolean {
   return NEED_KEYS.some((k) => needs[k] < CRITICAL);
+}
+
+/** Player home or NPC personal home. */
+function personalHomeId(world: World, content: ContentPack, sim: SimEntity): string {
+  if (isNpc(sim)) {
+    const def = getNpcDef(content, sim.npcDefId);
+    if (def?.homePlaceId && world.lots[def.homePlaceId]) return def.homePlaceId;
+  }
+  return world.neighborhood.homePlaceId;
+}
+
+/** Whether the place has an interaction that raises this need. */
+function placeHelpsNeed(
+  world: World,
+  content: ContentPack,
+  placeId: string,
+  need: NeedKey,
+): boolean {
+  for (const obj of objectsInPlace(world, placeId)) {
+    const odef = getObjectDef(content, obj.defId);
+    if (!odef) continue;
+    for (const iid of odef.interactions) {
+      const idef = getDef(content, iid);
+      if (!idef || idef.social) continue;
+      if (needHelp(idef, need) > 0) return true;
+    }
+  }
+  return false;
 }
 
 function careerSkillId(trackId: string | null): string | null {
@@ -269,65 +300,106 @@ export function gatherAutonomyCandidates(
     }
   }
 
-  // --- Travel to other places (fun / hunger / fitness / skills) ---
-  if (!critical || sim.needs.fun < CRITICAL || sim.needs.social < CRITICAL) {
-    const meta = getPlaceMeta(world, sim.placeId);
-    if (meta) {
-      for (const ex of meta.exits) {
-        let score = 2;
-        let reason = 'travel';
-        if (ex.to === 'park' || ex.to === 'plaza' || ex.to === 'street_oak' || ex.to === 'street_maple') {
-          score += urgencyWeight(sim.needs.fun) * 2 + urgencyWeight(sim.needs.social);
-          reason = 'travel_fun';
-        }
-        if (
-          ex.to === 'cafe' ||
-          ex.to === 'market' ||
-          ex.to === 'restaurant' ||
-          ex.to === 'convenience'
-        ) {
-          score += urgencyWeight(sim.needs.hunger) * 1.5 + urgencyWeight(sim.needs.fun);
-          reason = 'travel_food';
-        }
-        if (ex.to === 'gym') {
-          score += (100 - sim.needs.energy) * 0.05 + 8;
-          reason = 'travel_gym';
-        }
-        if (ex.to === 'salon' || ex.to === 'boutique') {
-          score += urgencyWeight(sim.needs.fun) + urgencyWeight(sim.needs.hygiene) * 0.5;
-          reason = 'travel_lifestyle';
-        }
-        if (ex.to === 'clinic' && sim.needs.energy < URGENT) {
-          score += 12;
-          reason = 'travel_clinic';
-        }
-        if ((ex.to === 'library' || ex.to === 'school') && skillFocus === 'logic') {
-          score += 18;
-          reason = 'travel_study';
-        }
-        if (ex.to === 'office' && skillFocus === 'charisma') {
-          score += 10;
-          reason = 'travel_office';
-        }
-        if (ex.to.startsWith('house_') || ex.to === 'home') {
-          score += urgencyWeight(sim.needs.social) * 0.8 + 4;
-          reason = 'travel_visit';
-        }
-        if (ex.to === 'home' && critical) {
-          score += 50; // go home when dying
-          reason = 'travel_home_critical';
-        }
-        // Prefer walking to exit then travel — encode as special interaction target null + travel flag via targetId negative? 
-        // Simpler: autonomy directly travels when score high enough and not holding items
-        if (!sim.inventory.held && score > 15) {
-          cands.push({
-            interactionId: `__travel__:${ex.to}`,
-            targetId: null,
-            score,
-            reason,
-          });
-        }
+  // --- Travel to other places (needs / fun / skills / personal home) ---
+  // Always available — critical survival must be able to leave barren lots.
+  const homeId = personalHomeId(world, content, sim);
+  const hereHelpsLow = placeHelpsNeed(world, content, sim.placeId, low.key);
+
+  if (
+    !sim.inventory.held &&
+    critical &&
+    !hereHelpsLow &&
+    homeId &&
+    sim.placeId !== homeId &&
+    world.lots[homeId]
+  ) {
+    cands.push({
+      interactionId: `__travel__:${homeId}`,
+      targetId: null,
+      score: 95,
+      reason: 'travel_home_critical',
+    });
+  }
+
+  const meta = getPlaceMeta(world, sim.placeId);
+  if (meta && !sim.inventory.held) {
+    for (const ex of meta.exits) {
+      let score = 2;
+      let reason = 'travel';
+      if (ex.to === 'park' || ex.to === 'plaza' || ex.to === 'street_oak' || ex.to === 'street_maple') {
+        score += urgencyWeight(sim.needs.fun) * 2 + urgencyWeight(sim.needs.social);
+        reason = 'travel_fun';
       }
+      if (
+        ex.to === 'cafe' ||
+        ex.to === 'market' ||
+        ex.to === 'restaurant' ||
+        ex.to === 'convenience'
+      ) {
+        score += urgencyWeight(sim.needs.hunger) * 1.5 + urgencyWeight(sim.needs.fun);
+        reason = 'travel_food';
+      }
+      if (ex.to === 'gym') {
+        score += (100 - sim.needs.energy) * 0.05 + 8;
+        reason = 'travel_gym';
+      }
+      if (ex.to === 'salon' || ex.to === 'boutique') {
+        score += urgencyWeight(sim.needs.fun) + urgencyWeight(sim.needs.hygiene) * 0.5;
+        reason = 'travel_lifestyle';
+      }
+      if (ex.to === 'clinic' && sim.needs.energy < URGENT) {
+        score += 12;
+        reason = 'travel_clinic';
+      }
+      if ((ex.to === 'library' || ex.to === 'school') && skillFocus === 'logic') {
+        score += 18;
+        reason = 'travel_study';
+      }
+      if (ex.to === 'office' && skillFocus === 'charisma') {
+        score += 10;
+        reason = 'travel_office';
+      }
+      if (ex.to.startsWith('house_') || ex.to === 'home') {
+        score += urgencyWeight(sim.needs.social) * 0.8 + 4;
+        reason = 'travel_visit';
+      }
+      if (ex.to === homeId && (critical || low.value < URGENT)) {
+        score += critical ? 55 : 28;
+        reason = 'travel_home_need';
+      }
+      // Prefer destinations that can fix the lowest need when urgent
+      if (low.value < URGENT && placeHelpsNeed(world, content, ex.to, low.key)) {
+        score += 20;
+        reason = `travel_fix_${low.key}`;
+      }
+      // Don't wander for fun while critically failing a survival need here
+      if (critical && !placeHelpsNeed(world, content, ex.to, low.key) && ex.to !== homeId) {
+        score -= 30;
+      }
+      if (score > 15) {
+        cands.push({
+          interactionId: `__travel__:${ex.to}`,
+          targetId: null,
+          score,
+          reason,
+        });
+      }
+    }
+
+    // Direct home travel even when home isn't a local exit (multi-hop city)
+    if (
+      homeId &&
+      sim.placeId !== homeId &&
+      !meta.exits.some((e) => e.to === homeId) &&
+      (critical || low.value < URGENT) &&
+      !hereHelpsLow
+    ) {
+      cands.push({
+        interactionId: `__travel__:${homeId}`,
+        targetId: null,
+        score: critical ? 90 : 40,
+        reason: 'travel_home_direct',
+      });
     }
   }
 
@@ -344,6 +416,10 @@ export function gatherAutonomyCandidates(
         if (!idef.social) continue;
         // Avoid mean by default for self-sufficiency
         if (idef.id.includes('mean')) continue;
+        if (idef.id.includes('flirt')) {
+          const rel = getRelationship(world.relationships, sim.id, other.id);
+          if ((rel?.friendship ?? 0) < FLIRT_MIN_FRIENDSHIP) continue;
+        }
         if (!canRunInteraction(sim, idef, null, content)) continue;
         let score =
           (idef.autonomyWeight ?? 1) +
@@ -422,6 +498,8 @@ export function systemAutonomyPreempt(world: World, content: ContentPack): void 
         ? act.interactionId
         : null;
     if (!interactionId) continue;
+    // Never cancel player-directed walk-to (see WALK_INTERACTION_ID in commands.ts)
+    if (interactionId === '__walk__') continue;
     const idef = getDef(content, interactionId);
     if (!idef) continue;
 
@@ -477,8 +555,8 @@ export function systemAutonomy(world: World, content: ContentPack): void {
     }
     if (world.clock.tick < sim.autonomy.cooldownUntil) continue;
 
-    // Auto-enroll in a career once if unemployed (self-sufficient life goals)
-    if (!sim.career.trackId && content.careers.length > 0) {
+    // Auto-enroll in a career once if unemployed (household only — never NPCs)
+    if (sim.role !== 'npc' && !sim.career.trackId && content.careers.length > 0) {
       // Stagger: after a few game hours of life
       if (world.clock.tick > 30) {
         const pick =
@@ -505,7 +583,7 @@ export function systemAutonomy(world: World, content: ContentPack): void {
       // Instant city travel (self-sufficient exploration)
       if (best.interactionId.startsWith('__travel__:')) {
         const dest = best.interactionId.slice('__travel__:'.length);
-        travelSimToPlace(world, sim.id, dest);
+        travelSimToPlace(world, sim.id, dest, { silent: isNpc(sim) });
         getObs().noteAutonomyPick({
           simId: sim.id,
           interactionId: best.interactionId,

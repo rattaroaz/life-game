@@ -725,6 +725,7 @@ export function furnishNeighborhood(world: World, content: ContentPack): void {
     p(world, content, 'plaza', 'object.sofa_basic', 12, 16);
     p(world, content, 'plaza', 'object.lamp_floor', 16, 12);
     p(world, content, 'plaza', 'object.lamp_floor', 18, 22);
+    p(world, content, 'plaza', 'object.toilet_basic', 22, 18);
   });
 
   ifEmpty(world, 'park', () => {
@@ -738,6 +739,7 @@ export function furnishNeighborhood(world: World, content: ContentPack): void {
     p(world, content, 'park', 'object.plant_pot', 16, 8);
     p(world, content, 'park', 'object.exercise_mat', 18, 18);
     p(world, content, 'park', 'object.exercise_mat', 12, 18);
+    p(world, content, 'park', 'object.toilet_basic', 6, 16);
   });
 
   ifEmpty(world, 'cafe', () => {
@@ -753,6 +755,10 @@ export function furnishNeighborhood(world: World, content: ContentPack): void {
     p(world, content, 'cafe', 'object.stereo', 20, 10);
     p(world, content, 'cafe', 'object.plant_pot', 18, 8);
     p(world, content, 'cafe', 'object.sofa_basic', 18, 16);
+    // Staff pad — Nora lives here and must self-care
+    p(world, content, 'cafe', 'object.toilet_basic', 22, 8);
+    p(world, content, 'cafe', 'object.shower_basic', 22, 10);
+    p(world, content, 'cafe', 'object.bed_double', 20, 18);
   });
 
   ifEmpty(world, 'restaurant', () => {
@@ -832,6 +838,7 @@ export function furnishNeighborhood(world: World, content: ContentPack): void {
     p(world, content, 'gym', 'object.shower_basic', 10, 18);
     p(world, content, 'gym', 'object.shower_basic', 12, 18);
     p(world, content, 'gym', 'object.sink_basic', 14, 18);
+    p(world, content, 'gym', 'object.toilet_basic', 16, 18);
     p(world, content, 'gym', 'object.stereo', 20, 12);
     p(world, content, 'gym', 'object.plant_pot', 20, 16);
   });
@@ -860,6 +867,11 @@ export function furnishNeighborhood(world: World, content: ContentPack): void {
     p(world, content, 'library', 'object.chair_dining', 14, 16);
     p(world, content, 'library', 'object.plant_pot', 20, 10);
     p(world, content, 'library', 'object.plant_pot', 20, 18);
+    // Staff pad — Theo lives here and must self-care
+    p(world, content, 'library', 'object.toilet_basic', 22, 8);
+    p(world, content, 'library', 'object.shower_basic', 22, 10);
+    p(world, content, 'library', 'object.bed_double', 20, 18);
+    p(world, content, 'library', 'object.fridge_basic', 22, 14);
   });
 
   ifEmpty(world, 'school', () => {
@@ -874,10 +886,38 @@ export function furnishNeighborhood(world: World, content: ContentPack): void {
     p(world, content, 'school', 'object.easel', 18, 16);
   });
 
+  // Patch amenities onto existing lots (saves that predate staff pads / public toilets)
+  ensurePlaceAmenity(world, content, 'cafe', 'object.toilet_basic', 22, 8);
+  ensurePlaceAmenity(world, content, 'cafe', 'object.shower_basic', 22, 10);
+  ensurePlaceAmenity(world, content, 'cafe', 'object.bed_double', 20, 18);
+  ensurePlaceAmenity(world, content, 'library', 'object.toilet_basic', 22, 8);
+  ensurePlaceAmenity(world, content, 'library', 'object.shower_basic', 22, 10);
+  ensurePlaceAmenity(world, content, 'library', 'object.bed_double', 20, 18);
+  ensurePlaceAmenity(world, content, 'library', 'object.fridge_basic', 22, 14);
+  ensurePlaceAmenity(world, content, 'gym', 'object.toilet_basic', 16, 18);
+  ensurePlaceAmenity(world, content, 'park', 'object.toilet_basic', 6, 16);
+  ensurePlaceAmenity(world, content, 'plaza', 'object.toilet_basic', 22, 18);
+
   for (const placeId of Object.keys(world.lots)) {
     refreshPlaceCaches(world, placeId);
   }
   world.lot = world.lots[world.neighborhood.activePlaceId]!;
+}
+
+/** Add a def to a place only if that def is not already present there. */
+function ensurePlaceAmenity(
+  world: World,
+  content: ContentPack,
+  placeId: string,
+  defId: string,
+  x: number,
+  y: number,
+): void {
+  if (!world.lots[placeId]) return;
+  for (const e of world.entities.values()) {
+    if (e.kind === 'object' && e.placeId === placeId && e.defId === defId) return;
+  }
+  p(world, content, placeId, defId, x, y);
 }
 
 export function objectsInPlace(world: World, placeId: string): ObjectEntity[] {
@@ -920,6 +960,7 @@ export function travelSimToPlace(
   world: World,
   simId: number,
   placeId: string,
+  opts?: { silent?: boolean },
 ): boolean {
   const sim = world.entities.get(simId);
   if (!sim || sim.kind !== 'sim') return false;
@@ -929,7 +970,8 @@ export function travelSimToPlace(
 
   sim.path.waypoints = [];
   sim.path.index = 0;
-  sim.queue.items = [];
+  // Keep player-queued items; clear autonomy junk so travel isn't blocked mid-queue
+  sim.queue.items = sim.queue.items.filter((q) => q.playerQueued);
   sim.action = { kind: 'idle' };
   sim.anim.clip = 'idle';
   sim.placeId = placeId;
@@ -943,10 +985,12 @@ export function travelSimToPlace(
     setActivePlace(world, placeId);
   }
 
-  world.eventBus.push({
-    type: 'toast',
-    message: `${sim.identity.firstName} arrived at ${meta.name}`,
-  });
+  if (!opts?.silent) {
+    world.eventBus.push({
+      type: 'toast',
+      message: `${sim.identity.firstName} arrived at ${meta.name}`,
+    });
+  }
   world.eventBus.push({
     type: 'travel',
     simId,

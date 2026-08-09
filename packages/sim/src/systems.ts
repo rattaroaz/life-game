@@ -1,4 +1,5 @@
 import { systemAutonomy, systemSurvivalSafety } from './autonomy.js';
+import { systemNpcRoutine } from './npc.js';
 import { advanceClock, isWeekend } from './clock.js';
 import type { LotState } from './lot.js';
 import {
@@ -305,6 +306,7 @@ export function systemCareerSchedule(world: World, content: ContentPack): void {
     // weekend off for v1 office/chef
   }
   for (const sim of allSims(world)) {
+    if (sim.role === 'npc') continue;
     if (!sim.career.trackId) continue;
     const career = content.careers.find((c) => c.id === sim.career.trackId);
     if (!career) continue;
@@ -717,6 +719,7 @@ export function runSimTick(world: World, content: ContentPack): void {
   timedSystem('InteractionProgress', () => systemInteractionProgress(world, content));
   timedSystem('Path', () => systemPath(world, content));
   timedSystem('Performing', () => systemPerforming(world, content));
+  timedSystem('NpcRoutine', () => systemNpcRoutine(world, content));
   timedSystem('Autonomy', () => systemAutonomy(world, content));
   timedSystem('Failsafe', () => systemFailsafe(world));
   // Lot walkability is rebuilt on place/delete/wall edit only (not every tick).

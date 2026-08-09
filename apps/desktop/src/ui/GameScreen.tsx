@@ -57,7 +57,10 @@ export function GameScreen() {
           if (entityId != null) {
             const ent = w.entities.get(entityId);
             if (ent?.kind === 'sim') {
-              cmd.selectSim(entityId);
+              // NPCs are interaction targets only — never become the controlled Sim
+              if (ent.role === 'household') {
+                cmd.selectSim(entityId);
+              }
               cmd.setWorldTarget(entityId);
             } else {
               cmd.setWorldTarget(entityId);
@@ -74,11 +77,22 @@ export function GameScreen() {
       },
       onDoubleClick(entityId, gx, gy) {
         try {
-          const w = useGameStore.getState().world;
-          const cmd = useGameStore.getState().commands;
-          if (!w || !cmd || w.mode !== 'live') return;
+          const store = useGameStore.getState();
+          const w = store.world;
+          const cmd = store.commands;
+          if (!w || !cmd) return;
 
-          // Double-click object: walk to it and open interactions
+          const flushToasts = () => {
+            for (const m of cmd.drainEvents()) store.pushToast(m);
+          };
+
+          if (w.mode !== 'live') {
+            store.pushToast('Switch to Live mode to walk');
+            return;
+          }
+
+          // Always move the currently selected Sim (not a newly clicked one)
+          const walkerId = w.ui.selectedSimId;
           let tx = gx;
           let ty = gy;
           if (entityId != null) {
@@ -89,7 +103,7 @@ export function GameScreen() {
               tx = Math.round(ent.transform.x);
               ty = Math.round(ent.transform.y) + 1;
             } else if (ent?.kind === 'sim') {
-              // Walk next to other sim
+              // Walk selected Sim next to the other Sim
               tx = Math.round(ent.transform.x);
               ty = Math.round(ent.transform.y) + 1;
               cmd.setWorldTarget(entityId);
@@ -98,16 +112,18 @@ export function GameScreen() {
             cmd.setWorldTarget(null);
           }
 
-          const ok = cmd.walkTo(tx, ty);
-          if (!ok) {
-            // try original tile
-            cmd.walkTo(gx, gy);
+          const ok = cmd.walkTo(tx, ty, walkerId);
+          if (!ok && (tx !== gx || ty !== gy)) {
+            cmd.drainEvents(); // keep only the final failure reason
+            cmd.walkTo(gx, gy, walkerId);
           }
+          flushToasts();
           reproject();
         } catch (e) {
           getObs().logger.error('input', 'double-click walk failed', {
             error: e instanceof Error ? e.message : String(e),
           });
+          useGameStore.getState().pushToast('Walk command failed');
         }
       },
     });
