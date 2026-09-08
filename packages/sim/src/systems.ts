@@ -9,7 +9,7 @@ import {
 } from './neighborhood.js';
 import { getObs } from './observability/hub.js';
 import { findPath, nearestWalkable } from './pathfinding.js';
-import { addRelationshipDelta } from './relationships.js';
+import { addRelationshipDelta, getRelationship } from './relationships.js';
 import { nextRng } from './rng.js';
 import type {
   ActionFailReason,
@@ -178,7 +178,18 @@ function applyOutcomes(
   }
   if (o.skillXp) {
     for (const [sk, xp] of Object.entries(o.skillXp)) {
+      const oldLevel = Math.floor(sim.skills[sk] ?? 0);
       sim.skills[sk] = clamp((sim.skills[sk] ?? 0) + xp / 100, 0, 10);
+      const newLevel = Math.floor(sim.skills[sk]);
+      
+      // Notify on level up
+      if (newLevel > oldLevel && newLevel > 0) {
+        const skillName = sk.charAt(0).toUpperCase() + sk.slice(1);
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} gained ${skillName} level ${newLevel}! ⭐`,
+        });
+      }
     }
   }
   if (o.moodBuff) {
@@ -207,6 +218,9 @@ function applyOutcomes(
     if (o.clearCrafting) delete target.crafting;
   }
   if (target?.kind === 'sim' && o.relationship) {
+    const oldFriendship = getRelationship(world.relationships, sim.id, target.id)?.friendship ?? 0;
+    const oldRomance = getRelationship(world.relationships, sim.id, target.id)?.romance ?? 0;
+    
     addRelationshipDelta(
       world.relationships,
       sim.id,
@@ -214,6 +228,36 @@ function applyOutcomes(
       o.relationship.friendship ?? 0,
       o.relationship.romance ?? 0,
     );
+    
+    const newRel = getRelationship(world.relationships, sim.id, target.id);
+    const targetName = target.identity.firstName;
+    
+    // Notify on relationship milestones
+    if (newRel) {
+      if (oldFriendship < 50 && newRel.friendship >= 50) {
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} and ${targetName} are now good friends! 💙`,
+        });
+      } else if (oldFriendship < 80 && newRel.friendship >= 80) {
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} and ${targetName} are best friends! 💖`,
+        });
+      }
+      
+      if (oldRomance < 50 && newRel.romance >= 50) {
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} is getting romantic with ${targetName}! 💕`,
+        });
+      } else if (oldRomance < 80 && newRel.romance >= 80) {
+        world.eventBus.push({
+          type: 'toast',
+          message: `${sim.identity.firstName} and ${targetName} are deeply in love! 💗`,
+        });
+      }
+    }
   }
 
   // Aspiration progress hooks

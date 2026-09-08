@@ -749,6 +749,7 @@ export function projectHud(world: World, content: ContentPack, toasts: string[])
               name: `${selected.identity.firstName} ${selected.identity.lastName}`,
               needs: { ...selected.needs },
               mood: selected.mood.value,
+              moodModifiers: [...selected.mood.modifiers],
               skills: { ...selected.skills },
               career: { ...selected.career },
               queue: [...selected.queue.items],
