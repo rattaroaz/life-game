@@ -4,6 +4,9 @@ import type { WorldView } from '@lifesim/render';
 import { runPlayerAction } from '../game/playerAction';
 import { useGameStore } from '../game/store';
 import { ActivityWindow } from './ActivityWindow';
+import { Moodlets } from './Moodlets';
+import { ThoughtBubble } from './ThoughtBubble';
+import { ActionQueue } from './ActionQueue';
 
 function getWorldView(): WorldView | undefined {
   return (window as unknown as { __lifesimView?: WorldView }).__lifesimView;
@@ -103,22 +106,27 @@ export function Hud() {
       </div>
 
       {hud.selectedSim && (
-        <ActivityWindow
-          name={hud.selectedSim.name}
-          label={hud.selectedSim.activityLabel}
-          detail={hud.selectedSim.activityDetail}
-          phase={hud.selectedSim.activityPhase}
-          onNameClick={() => {
-            const sim = hud.selectedSim;
-            if (!sim) return;
-            commands.selectSim(sim.id);
-            if (sim.placeId) commands.viewPlace(sim.placeId);
-            const w = useGameStore.getState().world;
-            const view = getWorldView();
-            if (w && view) view.snapToEntity(w, sim.id);
-            reproject();
-          }}
-        />
+        <>
+          <ActivityWindow
+            name={hud.selectedSim.name}
+            label={hud.selectedSim.activityLabel}
+            detail={hud.selectedSim.activityDetail}
+            phase={hud.selectedSim.activityPhase}
+            onNameClick={() => {
+              const sim = hud.selectedSim;
+              if (!sim) return;
+              commands.selectSim(sim.id);
+              if (sim.placeId) commands.viewPlace(sim.placeId);
+              const w = useGameStore.getState().world;
+              const view = getWorldView();
+              if (w && view) view.snapToEntity(w, sim.id);
+              reproject();
+            }}
+          />
+          <ThoughtBubble sim={hud.selectedSim} />
+          <Moodlets sim={hud.selectedSim} />
+          <ActionQueue sim={hud.selectedSim} content={content} />
+        </>
       )}
 
       <div className="hud-left">

@@ -380,6 +380,7 @@ export type HudProjection = {
     name: string;
     needs: Needs;
     mood: number;
+    moodModifiers: MoodModifier[];
     skills: Record<string, number>;
     career: CareerState;
     queue: QueueItem[];
